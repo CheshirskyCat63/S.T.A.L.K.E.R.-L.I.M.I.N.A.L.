@@ -1,0 +1,21 @@
+{
+  "backend": "NVIDIA PhysX 5.12 via ovphysx 0.7.0, CUDA GPU PBD",
+  "n_particles": 420,
+  "projectile_mass_kg": 5.0,
+  "projectile_speed_m_per_s": 13.5,
+  "physics_dt_s": 0.008333333333333333,
+  "steps": 132,
+  "gravity_m_s2": 0.0,
+  "elapsed_control_wall_s": 1.039,
+  "elapsed_shot_wall_s": 0.788,
+  "initial_max_difference_m": 0.0,
+  "final_mean_difference_m": 0.889370858669281,
+  "final_max_difference_m": 9.627060890197754,
+  "final_particles_different_gt_1cm": 286,
+  "projectile_final_position": [
+    -4.074314117431641,
+    0.23490600287914276,
+    -0.0009089999948628247
+  ],
+  "frames": 45
+}
