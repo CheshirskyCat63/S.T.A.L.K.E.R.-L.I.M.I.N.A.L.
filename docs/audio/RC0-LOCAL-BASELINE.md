@@ -20,7 +20,7 @@ Prepared on the owner's Windows 11 device, 2026-10-26. **Not a public game relea
 
 The cloned `xrEngine.exe` launched with `-fsltx fsgame.ltx -r4 -autotest`, mounted `LIMINAL Audio Configuration 20261026` and `LIMINAL Acoustic Tract v2`, initialized WASAPI 44100 Hz stereo F32 and 48 Resonance HRTFs, and created an engine log. The attempted 12-second gameplay auto-scenario **did not start the world** and timed out after 90 seconds with 0/120 frames. Only menu music was confirmed playing. This is **NOT a passed in-game smoke**, and cannot demonstrate native acoustic behavior in the new folder. It does not prove the executable crashed or lost its assets; the earlier installed source profile ran an actual game scene.
 
-Known inherited startup warnings include missing `item_document_1.ogf` and `kanistra_01.ogf` visuals; these are not fixed in the audio-only branch.
+Known inherited startup warnings include missing `item_document_1.ogf` and `kanistra_01.ogf` visuals, duplicate localization IDs, invalid `r2_tonemap_lowlum` settings, and `Missing or invalid ogg-comment, file: ir\\ir_default_far`. The last warning is audio-related and requires checking actual impulse-resource format/metadata before treating it as a working convolution IR; none is fixed in this baseline.
 
 The **complete physical v6 atlas remains blocked**; do not substitute `UNINSTALLABLE-geometry-audit.snd_rooms`. At the next audio iteration, fix the minimal game-start fixture/command and run one short actual in-world event. No movement or camera changes.
 
