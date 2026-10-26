@@ -123,7 +123,7 @@ class BinaryTests(unittest.TestCase):
             p = Path(d) / "rooms"
             make_fixture(p, 1.25)
             b = bytearray(p.read_bytes())
-            b[-5] ^= 0x40
+            b[-1] ^= 0x40
             p.write_bytes(b)
             with self.assertRaises((AtlasError, zlib.error)):
                 inspect(p)
