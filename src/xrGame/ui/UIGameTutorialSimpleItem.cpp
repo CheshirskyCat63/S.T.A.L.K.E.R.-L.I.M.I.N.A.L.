@@ -1,0 +1,472 @@
+#include "StdAfx.h"
+#include "pch_script.h"
+#include "UIGameTutorial.h"
+#include "../../xrUI/Widgets/UIStatic.h"
+#include "../../xrUI/UICursor.h"
+#include "../../xrUI/UIXmlInit.h"
+#include "object_broker.h"
+#include "../../xrEngine/xr_input.h"
+#include "UIGameSP.h"
+#include "../Level.h"
+#include "UIPdaWnd.h"
+#include "UIActorMenu.h"
+#include "UITalkWnd.h"
+#include "../MainMenu.h"
+#include "../../xrScripts/script_engine.h"
+#include "../ai_space.h"
+#include "UIInventoryWnd.h"
+#include "../../xrEngine/string_table.h"
+
+extern ENGINE_API bool bShowPauseString;
+
+CUISequenceSimpleItem::~CUISequenceSimpleItem()
+{
+	SubItemVecIt _I			= m_subitems.begin	();
+	SubItemVecIt _E			= m_subitems.end	();
+	for(;_I!=_E;++_I)		_I->Stop			();
+	m_subitems.clear		();
+	m_sound.stop			();
+	delete_data				(m_UIWindow);
+}
+
+bool CUISequenceSimpleItem::IsPlaying()
+{
+	if(m_time_start<0.0f)
+		return true;
+
+	return (m_time_start+m_time_length)>(Device.dwTimeContinual/1000.0f);
+}
+
+CUIWindow* find_child_window(CUIWindow* parent, const shared_str& _name)
+{
+	xrCriticalSectionGuard guard(parent->csUi);
+
+	CUIWindow::WINDOW_LIST& wl		= parent->GetChildWndList();
+	CUIWindow::WINDOW_LIST_it _I	= wl.begin();
+	CUIWindow::WINDOW_LIST_it _E	= wl.end();
+	for(;_I!=_E;++_I) if((*_I)->WindowName()==_name) return (*_I);
+	return nullptr;
+}
+
+void CUISequenceSimpleItem::Load(CUIXml* xml, int idx)
+{
+	CUISequenceItem::Load	(xml,idx);
+
+	XML_NODE* _stored_root	= xml->GetLocalRoot();
+	xml->SetLocalRoot		(xml->NavigateToNode("item",idx));
+	
+	const char* m_snd_name		= xml->Read				("sound",0,""			);
+	if (m_snd_name&&m_snd_name[0])
+	{
+		m_sound.create(m_snd_name, st_Effect, sg_Undefined);
+	}
+	m_time_length			= xml->ReadFlt			("length_sec",0,0		);
+	m_desired_cursor_pos.x	= xml->ReadAttribFlt	("cursor_pos",0,"x",0);
+	m_desired_cursor_pos.y	= xml->ReadAttribFlt	("cursor_pos",0,"y",0	);
+	xr_strcpy					(m_pda_section, xml->Read("pda_section",0,"")	);
+
+	const char* str				= xml->Read				("pause_state",		0,"ignore");
+	m_flags.set										(etiNeedPauseOn,	0==_stricmp(str, "on"));
+	m_flags.set										(etiNeedPauseOff,	0==_stricmp(str, "off"));
+	m_flags.set										(etiNeedPauseSound, 0==_stricmp(str, "on"));
+
+	str						= xml->Read				("guard_key",0,nullptr		);
+	m_continue_dik_guard	= kNOTBINDED;
+	if (str && !_stricmp(str,"any")){
+		m_continue_dik_guard = kLASTACTION;
+		str					= nullptr;
+	}
+	if(str){
+		EGameActions cmd		= action_name_to_id	(str);
+		m_continue_dik_guard	= cmd;
+	}
+
+	m_flags.set						(etiCanBeStopped,	(m_continue_dik_guard==kNOTBINDED));
+
+	const char* str_grab_input			= xml->Read("grab_input",0,"on");
+	m_flags.set						(etiGrabInput, (0==_stricmp(str_grab_input, "on")||0==_stricmp(str_grab_input, "1")) );
+	
+	int actions_count				= xml->GetNodesNum	(0,0,"action");
+	m_actions.resize				(actions_count);
+	for(int idx_=0; idx_<actions_count; ++idx_)
+	{
+		SActionItem& itm			= m_actions[idx_];
+		const char* str_					= xml->ReadAttrib("action", idx_, "id");
+		itm.m_action				= action_name_to_id(str_);
+		itm.m_bfinalize				= !!xml->ReadAttribInt("action", idx_, "finalize", false);
+		itm.m_functor				= xml->Read(xml->GetLocalRoot(), "action", idx_, "");
+	}
+
+	//ui-components
+	m_UIWindow						= new CUIWindow();
+	m_UIWindow->SetAutoDelete		(false);
+	XML_NODE* _lsr					= xml->GetLocalRoot();
+	CUIXmlInit xml_init;
+	xml_init.InitWindow				(*xml, "main_wnd", 0,	m_UIWindow);
+	xml->SetLocalRoot				(_lsr);
+
+	// initialize auto_static
+	int cnt							= xml->GetNodesNum	("main_wnd", 0, "auto_static");
+	m_subitems.reserve				(cnt);
+	string64						sname;
+	for(int i=0;i<cnt;++i)
+	{
+		XML_NODE* _sr				= xml->GetLocalRoot();
+		xml->SetLocalRoot			(xml->NavigateToNode("main_wnd", 0));
+
+		xr_sprintf					(sname, "auto_static_%d", i);
+
+		SSubItem _si;
+		_si.m_start				= xml->ReadAttribFlt("auto_static", i, "start_time", 0);
+		_si.m_length				= xml->ReadAttribFlt("auto_static", i, "length_sec", 0);
+
+		_si.m_visible = false;
+		CUIWindow* finded_child = find_child_window(m_UIWindow, sname);
+		_si.m_wnd = finded_child != nullptr ? finded_child->ui_cast_static() : nullptr;
+		if (nullptr == _si.m_wnd)
+		{
+			if (i < m_UIWindow->GetChildNum())
+				_si.m_wnd = m_UIWindow->GetChildWndList()[i]->ui_cast_static();
+		}
+		if (nullptr == _si.m_wnd)
+			continue;
+
+		_si.m_wnd->TextItemControl()->SetTextComplexMode(true);
+		_si.m_wnd->Show			(false);
+		if (m_compatibility_mode == eCompatibilityDefault)
+			_si.m_wnd->SetWidth		(_si.m_wnd->GetWidth()*UI().get_current_kx());
+		else if (m_compatibility_mode == eCompatibilityCS && UI().is_widescreen())
+			_si.m_wnd->SetWidth		(_si.m_wnd->GetWidth() / 1.2f);
+
+
+		if(UI().is_widescreen())
+		{
+			XML_NODE* autostatic_node	= xml->NavigateToNode("auto_static", i);
+			XML_NODE* ws_rect			= xml->NavigateToNode(autostatic_node, "widescreen_rect", 0);
+			if(ws_rect)
+			{
+				xml->SetLocalRoot		(autostatic_node);
+
+				Fvector2 pos, size;
+				pos.x					= xml->ReadAttribFlt("widescreen_rect", 0, "x");
+				pos.y					= xml->ReadAttribFlt("widescreen_rect", 0, "y");
+				size.x					= xml->ReadAttribFlt("widescreen_rect", 0, "width");
+				size.y					= xml->ReadAttribFlt("widescreen_rect", 0, "height");
+				_si.m_wnd->SetWndPos	(pos);
+				_si.m_wnd->SetWndSize	(size);
+			}
+		}
+
+		xml->SetLocalRoot			(_sr);
+		m_subitems.push_back(std::move(_si));
+	}
+	xml->SetLocalRoot				(_stored_root);
+}
+
+void CUISequenceSimpleItem::SSubItem::Start	()
+{
+	m_wnd->Show						(true);
+	m_wnd->ResetColorAnimation		();
+	m_visible						= true;
+}
+
+void CUISequenceSimpleItem::SSubItem::Stop	()
+{
+	m_wnd->Show						(false);
+	m_visible						= false;
+}
+
+void CUISequenceSimpleItem::OnRender()
+{
+	if(m_time_start < -2.0f)
+		m_time_start = -1.0f;
+	else
+	if(m_time_start < 0.0f)
+		m_time_start				= float(Device.dwTimeContinual)/1000.0f;
+}
+
+float CUISequenceSimpleItem::current_factor()
+{
+	if(m_time_start < 0.0f || fis_zero(m_time_length))
+		return 0.0f;
+	else
+		return ((Device.dwTimeContinual/1000.0f)-m_time_start) / m_time_length;
+}
+
+void CUISequenceSimpleItem::Update()
+{
+	inherited::Update();
+	float _start					= (m_time_start<0.0f)? (float(Device.dwTimeContinual)/1000.0f) : m_time_start;
+
+	float gt						= float(Device.dwTimeContinual)/1000.0f;
+	SubItemVecIt _I					= m_subitems.begin();
+	SubItemVecIt _E					= m_subitems.end();
+	for(;_I!=_E;++_I)
+	{
+		SSubItem& s					= *_I;
+		bool bPlaying				= (gt>(_start+s.m_start-EPS))&&(gt<(_start+s.m_start+s.m_length+EPS));
+		
+		if (true==bPlaying&&(false==s.m_visible))			
+			s.Start	();
+		else 
+		if ((false==bPlaying)&&(true==s.m_visible))	
+			s.Stop	();
+	}
+	
+	if(g_pGameLevel && (!m_pda_section || 0 == xr_strlen(m_pda_section)) )
+	{
+ 		if(CurrentGameUI())
+		{
+			if (CurrentGameUI()->PdaMenu()->IsShown()		||
+				(CurrentGameUI()->ActorMenu() && CurrentGameUI()->ActorMenu()->IsShown())		||
+				(CurrentGameUI()->InventoryWnd() && CurrentGameUI()->InventoryWnd()->IsShown()) ||
+				CurrentGameUI()->TalkMenu->IsActiveTalkUi()			||
+				CurrentGameUI()->UIChangeLevelWnd->IsShown() ||
+				(MainMenu()->IsActive() && !m_owner->m_flags.test(CUISequencer::etsOverMainMenu) )
+				)
+				m_UIWindow->Show						(false);
+			else
+				m_UIWindow->Show						(true);
+		}
+	}
+	if(m_desired_cursor_pos.x && m_desired_cursor_pos.y)
+		GetUICursor().SetUICursorPosition(m_desired_cursor_pos);
+}
+
+void CUISequenceSimpleItem::Start()
+{
+	m_time_start					= -3.0f;
+	inherited::Start				();
+	m_flags.set						(etiStoredPauseState, Device.Paused());
+	
+	if(m_flags.test(etiNeedPauseOn) && !m_flags.test(etiStoredPauseState))
+	{
+		Device.Pause			(true, true, false, "simpleitem_start");
+		bShowPauseString		= false;
+	}
+
+	if(m_flags.test(etiNeedPauseOff) && m_flags.test(etiStoredPauseState))
+		Device.Pause			(false, true, false, "simpleitem_start");
+
+	if(m_flags.test(etiNeedPauseSound))
+		Device.Pause			(true, false, true, "simpleitem_start");
+
+	if(m_desired_cursor_pos.x && m_desired_cursor_pos.y)
+		GetUICursor().SetUICursorPosition(m_desired_cursor_pos);
+
+	m_owner->MainWnd()->AttachChild	(m_UIWindow);
+
+	if (m_sound.handle()) {
+		m_sound.play(nullptr, sm_2D);
+	}
+
+	if (g_pGameLevel)
+	{
+		bool bShowPda			= false;
+		if (     !_stricmp( m_pda_section, "pda_tasks"       ) ) 
+		{
+			CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptTasks");		
+			bShowPda = true;	
+		}
+		else if( !_stricmp( m_pda_section, "pda_fraction_war") ) 
+		{
+			CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptFractionWar");
+			bShowPda = true;	
+		}
+		else if( !_stricmp( m_pda_section, "pda_ranking"     ) ) 
+		{
+			if (CurrentGameUI()->PdaMenu()->pUIRankingWnd)
+				CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptRanking");	
+			else
+				CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptRankingGlobal");
+
+			bShowPda = true;	
+		}
+		else if( !_stricmp( m_pda_section, "pda_logs"        ) ) 
+		{
+			CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptLogs");		
+			bShowPda = true;	
+		}
+		else if( !_stricmp( m_pda_section, "pda_show_second_task_wnd" ) )
+		{
+			CurrentGameUI()->PdaMenu()->Show_SecondTaskWnd(true);	
+			bShowPda = true;
+		}
+		// SoC only
+		else if( !_stricmp( m_pda_section, "pda_contacts") ) 
+		{
+			CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptContacts");
+			bShowPda = true;	
+		}
+		else if( !_stricmp( m_pda_section, "pda_map") ) 
+		{
+			CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptMap");
+			bShowPda = true;	
+		}
+		else if( !_stricmp( m_pda_section, "pda_quests") ) 
+		{
+			CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptQuests");
+			bShowPda = true;	
+		}
+		else if( !_stricmp( m_pda_section, "pda_diary") ) 
+		{
+			CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptDiary");
+			bShowPda = true;	
+		}
+		else if( !_stricmp( m_pda_section, "pda_statistics") ) 
+		{
+			CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptActorStatistic");
+			bShowPda = true;	
+		}
+		else if( !_stricmp( m_pda_section, "pda_encyclopedia") ) 
+		{
+			CurrentGameUI()->PdaMenu()->SetActiveSubdialog("eptEncyclopedia");
+			bShowPda = true;	
+		}
+		
+		if (CurrentGameUI())
+		{
+			CObject* current_entity = Level().CurrentEntity();
+
+			CActor* pActor = current_entity ? current_entity->cast_actor() : nullptr;
+			if (pActor == nullptr)
+			{
+				return;
+			}
+
+			bool isPDAShown = pActor->HudAnimator()->PdaAnimator() != nullptr ? pActor->HudAnimator()->PdaAnimator()->IsActive() : CurrentGameUI()->PdaMenu()->IsShown();
+			if ( ( !isPDAShown && bShowPda ) || (isPDAShown && !bShowPda ) )
+			{
+				if (pActor->HudAnimator()->PdaAnimator() != nullptr)
+				{
+					pActor->HudAnimator()->PdaAnimator()->SwitchAnimator();
+				}
+				else
+				{
+					CurrentGameUI()->PdaMenu()->ShowOrHideDialog(true);
+				}
+			}
+		}
+	}
+}
+
+bool CUISequenceSimpleItem::Stop			(bool bForce)
+{
+	if(!m_flags.test(etiCanBeStopped)&&!bForce) 
+		return false;
+
+	if(m_UIWindow->GetParent()==m_owner->MainWnd()) //started??
+		m_owner->MainWnd()->DetachChild	(m_UIWindow);
+
+	m_sound.stop				();
+
+	if(m_flags.test(etiNeedPauseOn) && !m_flags.test(etiStoredPauseState))
+		Device.Pause			(false, true, false, "simpleitem_stop");
+
+	if(m_flags.test(etiNeedPauseOff) && m_flags.test(etiStoredPauseState))
+		Device.Pause			(true, true, false, "simpleitem_stop");
+
+	if(m_flags.test(etiNeedPauseSound))
+		Device.Pause			(false, false, true, "simpleitem_stop");
+
+	if (g_pGameLevel)
+	{
+		if (CurrentGameUI())
+		{
+			CObject* current_entity = Level().CurrentEntity();
+
+			CActor* pActor = current_entity ? current_entity->cast_actor() : nullptr;
+			if (pActor == nullptr)
+			{
+				return false;
+			}
+
+			bool isPDAShown = pActor->HudAnimator()->PdaAnimator() != nullptr ? pActor->HudAnimator()->PdaAnimator()->IsActive() : CurrentGameUI()->PdaMenu()->IsShown();
+			if (isPDAShown)
+			{
+				if (pActor->HudAnimator()->PdaAnimator() == nullptr)
+				{
+					CurrentGameUI()->PdaMenu()->HideDialog();
+				}
+			}
+
+			if (CurrentGameUI()->GetActiveInventoryWindow())
+			{
+				CurrentGameUI()->GetActiveInventoryWindow()->HideDialog();
+			}
+		}
+	}
+
+	inherited::Stop				();
+	return true;
+}
+
+void CUISequenceSimpleItem::OnKeyboardPress	(int dik)
+{
+	if(!m_flags.test(etiCanBeStopped) )
+	{
+		VERIFY		(m_continue_dik_guard!=kNOTBINDED);
+		if(m_continue_dik_guard==kNOTBINDED)
+			m_flags.set(etiCanBeStopped, true); //not binded action :(
+
+		if(m_continue_dik_guard==kLASTACTION || get_binded_action(dik) == m_continue_dik_guard)
+			m_flags.set(etiCanBeStopped, true); //match key
+	}
+
+	for(u32 idx=0; idx<m_actions.size(); ++idx)
+	{
+		SActionItem& itm			= m_actions[idx];
+		bool b = is_binded(itm.m_action, dik);
+		if(b)
+		{
+			luabind::functor<void>	functor_to_call;
+			bool functor_exists		= ai().script_engine().functor(itm.m_functor.c_str() ,functor_to_call);
+			THROW3					(functor_exists, "Cannot find script function described in tutorial item ", itm.m_functor.c_str());
+			functor_to_call			();
+
+			if(itm.m_bfinalize)
+			{
+				if (g_pGameLevel)
+				{
+					CActor* actor = Level().CurrentControlEntity() ? Level().CurrentControlEntity()->cast_actor() : nullptr;
+					if (actor != nullptr)
+					{
+						CHudAnimatorBase* current_animator = actor->HudAnimator()->CurrentAnimator();
+						CHudAnimatorBase* target_animator = actor->HudAnimator()->TargetAnimator();
+						CHudStateAnimator* state_animator = current_animator != nullptr ? current_animator->cast_hud_state_animator() : nullptr;
+
+						if (target_animator != nullptr)
+						{
+							actor->HudAnimator()->SetTargetAnimator(nullptr);
+						}
+
+						if (state_animator != nullptr &&
+							state_animator->GetState() != CHudStateAnimator::EAnimatorStates::eHidden &&
+							state_animator->GetState() != CHudStateAnimator::EAnimatorStates::eHiding)
+						{
+							state_animator->SetState(CHudStateAnimator::EAnimatorStates::eHiding);
+						}
+					}
+				}
+
+				m_flags.set					(etiCanBeStopped, true);
+				m_stop_lua_functions.clear	();
+				Stop						();
+			}
+		}
+	}
+}
+
+void CUISequenceSimpleItem::OnMousePress	(int btn)
+{
+	int dik = 0;
+	switch(btn) 
+	{
+		case 0:dik = MOUSE_1;break;
+		case 1:dik = MOUSE_2;break;
+		case 2:dik = MOUSE_3;break;
+		default:return;
+	}
+	OnKeyboardPress(dik);
+}
+

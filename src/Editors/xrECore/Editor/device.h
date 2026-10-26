@@ -1,0 +1,187 @@
+#pragma once
+
+#include "../../../xrEngine/device.h"
+#include "UI_Camera.h"
+#include "../../../Layers/xrRender/HWCaps.h"
+#include "../../../Layers/xrRender/HW.h"
+#include "../../../xrEngine/pure.h"
+#include "../../../xrCore/FTimer.h"
+#include "EStats.h"
+#include "../../../xrEngine/Shader_xrLC.h"
+#include "../../../Layers/xrRender/Shader.h"
+#include "../../../Layers/xrRender/R_Backend.h"
+#include "../../../Layers/xrRender/EditorDrawContext.h"
+
+#include "../Engine/XrGameMaterialLibraryEditors.h"
+
+//---------------------------------------------------------------------------
+// refs
+class CGameFont;
+class CInifile;
+class CResourceManager;
+#undef CreateWindow
+//------------------------------------------------------------------------------
+class CEditorRenderDevice;
+class XrGameMaterialLibraryEditors;
+extern ECORE_API CEditorRenderDevice* EDevice;
+
+#define REContext ((ID3D11DeviceContext*)GRHI->GetContext())
+#define REDevice ((ID3D11Device*)Device.GetRenderDevice())
+
+class ECORE_API CEditorRenderDevice :
+	public CRenderDevice
+{
+	friend class CUI_Camera;
+	friend class TUI;
+
+private:
+	float m_fNearer;
+
+	ref_texture SearchIcon;
+
+	void _SetupStates();
+	void _Create(IReader* F);
+	void _Destroy(bool bKeepTextures);
+
+public:
+	ref_texture texture_null;
+	Fmaterial m_DefaultMat;
+
+	float RenderRadius;
+
+	RECT NormalWinSize;
+	bool NormalWinSizeSaved = false;
+	bool isZoomed = false;
+
+public:
+	CEditorRenderDevice();
+	virtual ~CEditorRenderDevice();
+
+
+	virtual bool Paused() const { return false; };
+	void time_factor(float);
+	bool Create();
+	void Destroy();
+	void Resize(int w, int h, bool maximized);
+	void ReloadTextures();
+	void UnloadTextures();
+
+	void RenderNearer(float f_Near);
+	void ResetNearer();
+	bool Begin();
+	void End();
+
+	void Initialize(void);
+	void ShutDown(void);
+	void Reset(IReader* F, bool bKeepTextures);
+
+	void MaximizedWindow();
+	void ResoreWindow(bool moving);
+	void InitWindowStyle();
+
+	virtual void DumpResourcesMemoryUsage()
+	{
+	}
+
+	// Sprite rendering
+	IC float _x2real(float x)
+	{
+		return (x + 1) * TargetWidth * 0.5f;
+	}
+
+	IC float _y2real(float y)
+	{
+		return (y + 1) * TargetHeight * 0.5f;
+	}
+
+	// draw (state lives in GEditorDraw on the render side)
+	IC void SetShader(const ref_shader& sh) { GEditorDraw.SetShader(sh); }
+	IC ref_shader GetShader() { return GEditorDraw.GetShader(); }
+	IC void DP(ERHI_PRIMITIVE_TOPOLOGY pt, ref_geom geom, u32 startV, u32 pc) { GEditorDraw.DP(pt, geom, startV, pc); }
+	IC void DIP(ERHI_PRIMITIVE_TOPOLOGY pt, ref_geom geom, u32 baseV, u32 startV, u32 countV, u32 startI, u32 PC) { GEditorDraw.DIP(pt, geom, baseV, startV, countV, startI, PC); }
+
+	IC void SetRS(D3DRENDERSTATETYPE p1, u32 p2)
+	{
+		VERIFY(b_is_Ready);
+		GEditorDraw.SetRS(p1, p2);
+	}
+
+	IC void SetSS(u32 sampler, D3DSAMPLERSTATETYPE type, u32 value)
+	{
+		VERIFY(b_is_Ready);
+//		VERIFY2(0, "Implement");
+	}
+
+	// light&material
+	IC void LightEnable(u32 dwLightIndex, bool bEnable)
+	{
+//		VERIFY2(0, "Implement");
+	}
+
+	IC void SetLight(u32 dwLightIndex, Flight& lpLight)
+	{
+//		VERIFY2(0, "Implement");
+	}
+
+	IC void SetMaterial(Fmaterial& mat)
+	{
+//		VERIFY2(0, "Implement");
+	}
+
+	IC void ResetMaterial()
+	{
+//		VERIFY2(0, "Implement");
+	}
+
+	// update
+	void UpdateView();
+	void FrameMove();
+
+	bool MakeScreenshot(U32Vec& pixels, u32 width, u32 height);
+
+	bool RenderScreenshotRT(ref_rt& rtColor, ref_rt& rtDepth);
+	bool ReadbackRT(ref_rt& rt, U32Vec& pixels);
+	bool DownsampleLODAtlas(xr_vector<ref_rt>& srcRTs, ref_rt& atlasRT, u32 tgt_w, u32 tgt_h, u32 samples, u32 quality);
+
+	void InitTimer();
+
+	// Mode control
+	virtual void Pause(bool bOn, bool bTimer, bool bSound, const char* reason) override
+	{
+	}
+
+	virtual void PreCache(u32 amount, bool b_draw_loadscreen, bool b_wait_user_input) override
+	{
+	}
+
+	virtual void Clear();
+
+public:
+	Shader_xrLC_LIB ShaderXRLC;
+
+	// camera
+	CRegistrator<pureDrawUI> seqDrawUI;
+
+	// Dependent classes
+	xr_unique_ptr<XrGameMaterialLibraryEditors> m_MtlLib;
+
+private:
+	virtual void _BCL AddSeqFrame(pureFrame* f, bool mt);
+	virtual void _BCL RemoveSeqFrame(pureFrame* f);
+
+public:
+	HWND GetHWND() const;
+	void CreateWindow();
+	void DestryWindow();
+	virtual void Reset(bool precache);
+	virtual bool IsEditorMode() override { return true; }
+};
+
+#include "../../../Layers/xrRender/EditorDeviceFlags.h"
+
+#define DEFAULT_CLEARCOLOR 0x00555555
+
+#define REQ_CREATE()	if (!EDevice->bReady)	return;
+#define REQ_DESTROY()	if (EDevice->bReady)	return;
+
+#include "../../../Layers/xrRender/R_Backend_Runtime.h"

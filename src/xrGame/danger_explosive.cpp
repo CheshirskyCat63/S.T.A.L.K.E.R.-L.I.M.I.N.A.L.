@@ -1,0 +1,26 @@
+////////////////////////////////////////////////////////////////////////////
+//	Module 		: danger_explosive.cpp
+//	Created 	: 08.06.2005
+//  Modified 	: 08.06.2005
+//	Author		: Dmitriy Iassenev
+//	Description : Danger explosive class
+////////////////////////////////////////////////////////////////////////////
+
+#include "StdAfx.h"
+#include "danger_explosive.h"
+#include "GameObject.h"
+#include "Explosive.h"
+
+bool CDangerExplosive::operator==(const ALife::_OBJECT_ID& object_id) const
+{
+	if (!m_grenade)
+	{
+		return false;
+	}
+
+	CExplosive* cast_explosive = const_cast<CExplosive*>(m_grenade);
+	const CGameObject* game_object = cast_explosive != nullptr ? cast_explosive->cast_game_object() : nullptr;
+	VERIFY(game_object);
+
+	return game_object->ID() == object_id;
+}

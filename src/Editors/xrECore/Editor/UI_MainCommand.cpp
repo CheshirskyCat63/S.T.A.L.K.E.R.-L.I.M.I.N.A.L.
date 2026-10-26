@@ -1,0 +1,845 @@
+//---------------------------------------------------------------------------
+
+#include "stdafx.h"
+
+
+#include "ui_main.h"
+#include "UI_ToolsCustom.h"
+#include "ImageManager.h"
+
+#include "UIIConPicker.h"
+#include "UIEditLightAnim.h"
+#include "UIImageEditorForm.h"
+#include "UIMinimapEditorForm.h"
+#include "UILightingForm.h"
+#include "UISoundEditorForm.h"
+#include "D3DUtils.h"
+#include "UIMoveToCamera.h"
+
+#include "Library.h"
+#include "../Layers/xrRender/PSLibrary.h"
+#include "../xrEngine/LightAnimLibrary.h"
+
+#include "ImageManager.h"
+#include "SoundManager.h"
+#include "../Layers/xrRender/ResourceManager.h"
+#include "engine/XrGamePersistentEditors.h"
+#include "../../../xrEngine/string_table.h"
+
+ECommandVec ECommands;
+bool bAllowReceiveCommand = false;
+bool bAllowLogCommands = false;
+xr_string sCommandListText;
+
+bool AllowLogCommands()
+{
+	return bAllowLogCommands;
+}
+
+ECommandVec& GetEditorCommands()
+{
+	return ECommands;
+}
+
+void EnableReceiveCommands()
+{
+	bAllowReceiveCommand = true;
+}
+
+SESubCommand* FindCommandByShortcut(const xr_shortcut& val)
+{
+	ECommandVec& cmds		= GetEditorCommands();
+	for (u32 cmd_idx=0; cmd_idx<cmds.size(); cmd_idx++){
+		SECommand*& CMD		= cmds[cmd_idx];
+		if (CMD&&CMD->editable){
+			VERIFY(!CMD->sub_commands.empty());
+			for (u32 sub_cmd_idx=0; sub_cmd_idx<CMD->sub_commands.size(); sub_cmd_idx++){
+				SESubCommand*& SUB_CMD = CMD->sub_commands[sub_cmd_idx];
+				if (SUB_CMD->shortcut.similar(val)) return SUB_CMD;
+			}
+		}
+	}
+	return nullptr;
+}
+SECommand* FindCommandByName(const char* nm)
+{
+	ECommandVec& cmds		= GetEditorCommands();
+	for (u32 cmd_idx=0; cmd_idx<cmds.size(); cmd_idx++){
+		SECommand*& CMD		= cmds[cmd_idx];
+		if (CMD&&(0==stricmp(CMD->name,nm))) return CMD;
+	}
+	return nullptr;
+}
+SESubCommand* FindSubCommandByName(SECommand* CMD, const char* nm)
+{
+	VERIFY(CMD && !CMD->sub_commands.empty());
+	for (u32 sub_cmd_idx=0; sub_cmd_idx<CMD->sub_commands.size(); sub_cmd_idx++){
+		SESubCommand* SUB_CMD = CMD->sub_commands[sub_cmd_idx];
+		if (0==stricmp(SUB_CMD->desc.c_str(),nm)) return SUB_CMD;
+	}
+	return nullptr;
+}
+void ParseParam(xr_string sp, CCommandVar& res)
+{
+	if (!sp.empty()){
+		u32 rs=0,ip=0;
+		if (nullptr==strstr(sp.c_str(),"\""))
+			rs			= sscanf(sp.c_str(),"%u",&ip);
+		if (1!=rs){
+			_GetItem(sp.c_str(),1,sp,'\"');
+			if (!sp.empty()) res = sp;
+		}else		res = ip;
+	}
+}
+CCommandVar		ExecCommand	(const xr_shortcut& val)
+{
+	SESubCommand* SUB 	= FindCommandByShortcut(val);
+	CCommandVar res		= CCommandVar(u32(0));
+	if (SUB)
+		res				= ExecCommand(SUB->parent->idx,SUB->p0,SUB->p1);
+	return res;
+}
+CCommandVar 	ExecCommand	(u32 cmd, CCommandVar p1, CCommandVar p2)
+{
+	if (!bAllowReceiveCommand)	return 0;
+
+	VERIFY				(cmd<ECommands.size());
+	CCommandVar	res;
+	SECommand*	CMD 	= ECommands[cmd];
+
+	if (CMD == nullptr || CMD->command.empty())
+		return 0;
+
+	//static int exec_level= 0;
+	if (bAllowLogCommands)
+	{
+		xr_string sp1 = p1.IsString() ? xr_string(p1) : "";
+		xr_string sp2 = p2.IsString() ? xr_string(p2) : "";
+
+		if (p1.IsString()) sp1 = ((sp1.find("\n") == sp1.npos) && (sp1.find("\r") == sp1.npos)) ? sp1 : "...";
+		if (p2.IsString()) sp2 = ((sp2.find("\n") == sp2.npos) && (sp2.find("\r") == sp2.npos)) ? sp2 : "...";
+
+	}
+
+	res = CMD->command(p1,p2);
+	return res;
+}
+void	RegisterCommand (u32 cmd, SECommand* cmd_impl)
+{
+	if (cmd>=ECommands.size()) 
+		ECommands.resize(cmd+1,nullptr);
+	SECommand*&	CMD = ECommands[cmd];
+	if (CMD){
+		Msg			("RegisterCommand: command '%s' overridden by command '%s'.",*CMD->desc,*cmd_impl->desc);
+		xr_delete	(CMD);
+	}
+	CMD	   			= cmd_impl;
+}
+void	RegisterSubCommand(SECommand* cmd_impl, const char* desc, CCommandVar p0, CCommandVar p1)
+{
+	VERIFY		(cmd_impl);
+	cmd_impl->AppendSubCommand(desc,p0,p1);
+}
+
+bool LoadShortcuts(nlohmann::json& Data)
+{
+	for (u32 cmd_idx = 0; cmd_idx < ECommands.size(); cmd_idx++) 
+	{
+		SECommand*& CMD = ECommands[cmd_idx];
+
+		if (CMD && CMD->editable)
+		{
+			for (u32 sub_cmd_idx = 0; sub_cmd_idx < CMD->sub_commands.size(); sub_cmd_idx++)
+			{
+				SESubCommand*& SUB = CMD->sub_commands[sub_cmd_idx];
+				string256 nm, tmp;
+
+				if (SUB->desc.size())	sprintf(nm, "%s.\"%s\"", CMD->Name(), SUB->desc.c_str());
+				else   					sprintf(nm, "%s", CMD->Name());
+
+				auto ShortCutItern = Data.find("shortcuts");
+				if (ShortCutItern != Data.end())
+				{
+					auto awda = *ShortCutItern;
+					if (!awda.contains(nm))
+						continue;
+				}
+				std::string val = Data["shortcuts"][nm];
+				int res = sscanf(val.data(), "%hu,%255s", &SUB->shortcut.hotkey, tmp);
+
+				if (2 == res) 
+				{
+					xr_string 		sp;
+					_GetItem(tmp, 0, sp);
+					ParseParam(sp, SUB->p0);
+					_GetItem(tmp, 1, sp);
+					ParseParam(sp, SUB->p1);
+				}
+			}
+		}
+	}
+	return true;
+}
+
+bool SaveShortcuts(nlohmann::json& Data)
+{
+	for (u32 cmd_idx = 0; cmd_idx < ECommands.size(); cmd_idx++) 
+	{
+		SECommand*& CMD = ECommands[cmd_idx];
+		if (CMD && CMD->editable) {
+			for (u32 sub_cmd_idx = 0; sub_cmd_idx < CMD->sub_commands.size(); sub_cmd_idx++) 
+			{
+				SESubCommand*& SUB = CMD->sub_commands[sub_cmd_idx];
+				string256 nm, tmp;
+				if (SUB->desc.size())	sprintf(nm, "%s.\"%s\"", CMD->Name(), SUB->desc.c_str());
+				else   					sprintf(nm, "%s", CMD->Name());
+				if (SUB->p0.IsString() && SUB->p1.IsString()) 		sprintf(tmp, "%d, \"%s\",\"%s\"", SUB->shortcut.hotkey, xr_string(SUB->p0).c_str(), xr_string(SUB->p1).c_str());
+				else if (SUB->p0.IsInteger() && SUB->p1.IsInteger())	sprintf(tmp, "%d, %d,%d", SUB->shortcut.hotkey, u32(SUB->p0), u32(SUB->p1));
+				else if (SUB->p0.IsInteger() && SUB->p1.IsString()) 	sprintf(tmp, "%d, %d,\"%s\"", SUB->shortcut.hotkey, u32(SUB->p0), xr_string(SUB->p1).c_str());
+				else if (SUB->p0.IsString() && SUB->p1.IsInteger()) 	sprintf(tmp, "%d, \"%s\",%d", SUB->shortcut.hotkey, xr_string(SUB->p0).c_str(), u32(SUB->p1));
+				Data["shortcuts"][nm] = tmp;
+			}
+		}
+	}
+	return true;
+}
+
+void TUI::ClearCommands()
+{
+	for (ECommandVecIt it = ECommands.begin(); it != ECommands.end(); it++)
+	{
+		xr_delete(*it);
+	}
+	ECommands.clear();
+}
+
+CCommandVar TUI::CommandBreakLastOperation(CCommandVar p1, CCommandVar p2)
+{
+	if (mrYes == ELog.DlgMsg(mtConfirmation, mbYes | mbNo, "Are you sure to break current action?"))
+	{
+		NeedBreak();
+		ELog.Msg(mtInformation, "Execution canceled.");
+	}
+	return 1;
+}
+
+CCommandVar CommandInitialize(CCommandVar p1, CCommandVar p2)
+{
+	EDevice = new CEditorRenderDevice();
+	BindEditorContext();
+	DevicePtr = EDevice;
+	CCommandVar res		= true;
+	{
+		string_path              fn;
+		xr_strconcat(fn, EContext.UI->EditorName(), ".log");
+		FS.update_path(fn, _local_root_, fn);
+		string_path 			si_name;
+		FS.update_path(si_name, "$game_config$", "system.ltx");
+		pSettings = new CInifile(si_name, true);// false,true,true);
+
+		g_pStringTable = new CStringTable();
+
+		string_path					fname;
+		FS.update_path(fname, "$game_config$", "game.ltx");
+		pGameIni = new CInifile(fname, true);
+		CHECK_OR_EXIT(0 != pGameIni->section_count(), make_string<const char*>("Cannot find file %s.\nReinstalling application may fix this problem.", fname));
+	}
+	// make interface
+	//----------------
+	if(EPrefs)EPrefs->OnCreate		();
+	if (EContext.UI->OnCreate())
+	{
+		ExecCommand		(COMMAND_CREATE_SOUND_LIB);	R_ASSERT(SndLib);
+		SndLib->OnCreate();
+		LALib.OnCreate	();
+		Lib.OnCreate	();
+        bool bWeather = psDeviceFlags.is(rsEnvironment);
+        psDeviceFlags.set(rsEnvironment, false);
+        g_pGamePersistent = new XrGamePersistentEditors();
+        g_pGamePersistent->Environment().EnsureMixer();
+        if (Tools)
+        {
+            if (Tools->OnCreate())
+            {
+
+                if (EPrefs)
+                {
+                    EPrefs->LoadConfig();
+                    if (bWeather && EPrefs->sWeather.size())
+                    {
+                            psDeviceFlags.set(rsEnvironment, true);
+                            g_pGamePersistent->Environment().SetWeather(EPrefs->sWeather, true);
+                    }
+                    g_pGamePersistent->Environment().ed_from_time = EPrefs->env_from_time;
+                    g_pGamePersistent->Environment().ed_to_time = EPrefs->env_to_time;
+                    g_pGamePersistent->Environment().fTimeFactor = EPrefs->env_speed;
+                }
+				EDevice->seqAppStart.Process<&pureAppStart::OnAppStart>();
+				ExecCommand(COMMAND_CLEAR);
+				ExecCommand(COMMAND_CHANGE_ACTION, etaSelect);
+            }
+            else
+            {
+                res = false;
+            }
+        }
+    }
+    else
+    {
+        res = false;
+    }
+    return res;
+}             
+
+CCommandVar CommandDestroy(CCommandVar p1, CCommandVar p2)
+{
+	EPrefs->env_from_time = g_pGamePersistent->Environment().ed_from_time;
+	EPrefs->env_to_time = g_pGamePersistent->Environment().ed_to_time;
+	EPrefs->env_speed = g_pGamePersistent->Environment().fTimeFactor;
+	EPrefs->OnDestroy();
+	ExecCommand(COMMAND_CLEAR);
+	EDevice->seqAppEnd.Process<&pureAppEnd::OnAppEnd>();
+	xr_delete(g_pGamePersistent);
+	LALib.OnDestroy();
+	Tools->OnDestroy();
+	SndLib->OnDestroy();
+	xr_delete(SndLib);
+	DestroyEditorRenderHostObjects();
+	Lib.OnDestroy();
+	EContext.UI->OnDestroy();
+
+	xr_delete(pSettings);
+	xr_delete(pGameIni);
+
+	ELog.Close();
+
+	for (auto& item : ECommands)
+	{
+		xr_delete(item);
+	}
+	ECommands.clear();
+
+	xr_delete(EDevice);
+	DevicePtr = nullptr;
+
+	return true;
+}
+
+CCommandVar CommandQuit(CCommandVar p1, CCommandVar p2)
+{
+	EContext.UI->Quit();
+	return true;
+}
+
+CCommandVar CommandEditorPrefs(CCommandVar p1, CCommandVar p2)
+{
+	EPrefs->Edit();
+	return true;
+}
+
+CCommandVar CommandChangeAction(CCommandVar p1, CCommandVar p2)
+{
+	Tools->SetAction(ETAction(u32(p1)));
+	return true;
+}
+
+CCommandVar CommandChangeAxis(CCommandVar p1, CCommandVar p2)
+{
+	Tools->SetAxis(ETAxis(u32(p1)));
+	return true;
+}
+
+CCommandVar CommandSimulate(CCommandVar p1, CCommandVar p2)
+{
+	Tools->Simulate();
+	return true;
+}
+
+CCommandVar CommandUseSimulatePositions(CCommandVar p1, CCommandVar p2)
+{
+	Tools->UseSimulatePositions();
+	return true;
+}
+
+CCommandVar CommandIconPicker(CCommandVar p1, CCommandVar p2)
+{
+	UIIconPicker::Show(p1);
+	return true;
+}
+
+CCommandVar CommandSetSettings(CCommandVar p1, CCommandVar p2)
+{
+	Tools->SetSettings(p1, p2);
+	return true;
+}
+
+CCommandVar CommandSoundEditor(CCommandVar p1, CCommandVar p2)
+{
+	UISoundEditorForm::Show(p1);
+	return true;
+}
+
+CCommandVar CommandSyncSounds(CCommandVar p1, CCommandVar p2)
+{
+	if (ELog.DlgMsg(mtConfirmation, mbYes | mbNo, "Are you sure to synchronize sounds?") == mrYes)
+		SndLib->RefreshSounds(true, true);
+	return true;
+}
+
+CCommandVar CommandSyncSoundsHard(CCommandVar p1, CCommandVar p2)
+{
+	if (ELog.DlgMsg(mtConfirmation, mbYes | mbNo, "Are you sure to synchronize sounds?") == mrYes)
+		SndLib->RefreshSounds(true, false);
+	return true;
+}
+
+CCommandVar CommandImageEditor(CCommandVar p1, CCommandVar p2)
+{
+	UIImageEditorForm::Show(false);
+	return true;
+}
+
+CCommandVar CommandImageEditorSelect(CCommandVar p1, CCommandVar p2)
+{
+	UIImageEditorForm::FindInEditor((xr_string)p1, !!p2);
+	return true;
+}
+
+CCommandVar CommandLightAnimEditor(CCommandVar p1, CCommandVar p2)
+{
+	UIEditLightAnim::Show();
+	return true;
+}
+
+CCommandVar CommandMinimapEditor(CCommandVar p1, CCommandVar p2)
+{
+	UIMinimapEditorForm::Show();
+	return true;
+}
+
+CCommandVar CommandWeatherProperties(CCommandVar p1, CCommandVar p2)
+{
+    UILightingForm::Show();
+    return true;
+}
+
+CCommandVar CommandCheckTextures(CCommandVar p1, CCommandVar p2)
+{
+	UIImageEditorForm::ImportTextures();
+	return true;
+}
+
+CCommandVar CommandRefreshTextures(CCommandVar p1, CCommandVar p2)
+{
+	if (ELog.DlgMsg(mtConfirmation, mbYes | mbNo, "Are you sure to synchronize textures?") == mrYes)
+	{
+		ImageLib.RefreshTextures(nullptr);
+	}
+	return true;
+}
+
+CCommandVar CommandReloadTextures(CCommandVar p1, CCommandVar p2)
+{
+	EDevice->ReloadTextures();
+	EContext.UI->RedrawScene();
+	return true;
+}
+
+CCommandVar CommandUnloadTextures(CCommandVar p1, CCommandVar p2)
+{
+	EDevice->UnloadTextures();
+	return true;
+}
+
+CCommandVar CommandEvictObjects(CCommandVar p1, CCommandVar p2)
+{
+	Lib.EvictObjects();
+	return true;
+}
+
+CCommandVar CommandCheckModified(CCommandVar p1, CCommandVar p2)
+{
+	return Tools->IsModified();
+}
+
+CCommandVar CommandExit(CCommandVar p1, CCommandVar p2)
+{
+	return Tools->IfModified();
+}
+
+CCommandVar CommandShowProperties(CCommandVar p1, CCommandVar p2)
+{
+	if (p1.IsString())
+	{
+		xr_string SSS = p1;
+		Tools->ShowProperties(SSS.c_str());
+	}
+	else
+	{
+		Tools->ShowProperties(nullptr);
+	}
+	return true;
+}
+
+CCommandVar CommandUpdateProperties(CCommandVar p1, CCommandVar p2)
+{
+	Tools->UpdateProperties(p1);
+	return true;
+}
+
+CCommandVar CommandZoomExtents(CCommandVar p1, CCommandVar p2)
+{
+	Tools->ZoomObject(p1);
+	EContext.UI->RedrawScene();
+	return true;
+}
+
+CCommandVar CommandToggleRenderWire(CCommandVar p1, CCommandVar p2)
+{
+	if (GEditorDraw.FillMode != D3DFILL_WIREFRAME)
+	{
+		GEditorDraw.FillMode = D3DFILL_WIREFRAME;
+	}
+	else
+	{
+		GEditorDraw.FillMode = D3DFILL_SOLID;
+	}
+	EContext.UI->RedrawScene();
+	return true;
+}
+
+CCommandVar CommandToggleSafeRect(CCommandVar p1, CCommandVar p2)
+{
+	psDeviceFlags.set(rsDrawSafeRect, !psDeviceFlags.is(rsDrawSafeRect));
+	EContext.UI->RedrawScene();
+	return true;
+}
+
+CCommandVar CommandToggleGrid(CCommandVar p1, CCommandVar p2)
+{
+	psDeviceFlags.set(rsDrawGrid, !psDeviceFlags.is(rsDrawGrid));
+	EContext.UI->RedrawScene();
+	return true;
+}
+
+CCommandVar CommandUpdateGrid(CCommandVar p1, CCommandVar p2)
+{
+	DU_impl.UpdateGrid(EPrefs->grid_cell_count, EPrefs->grid_cell_size);
+	EContext.UI->RedrawScene();
+	return true;
+}
+
+CCommandVar CommandGridNumberOfSlots(CCommandVar p1, CCommandVar p2)
+{
+	if (p1)
+	{
+		EPrefs->grid_cell_count += 2;
+	}
+	else
+	{
+		EPrefs->grid_cell_count -= 2;
+	}
+	ExecCommand(COMMAND_UPDATE_GRID);
+	EContext.UI->RedrawScene();
+	return true;
+}
+
+CCommandVar CommandGridSlotSize(CCommandVar p1, CCommandVar p2)
+{
+	float step = 1.f;
+	float val = EPrefs->grid_cell_size;
+	if (p1)
+	{
+		if (val < 1)
+		{
+			step /= 10.f;
+		}
+		EPrefs->grid_cell_size += step;
+	}
+	else
+	{
+		if (fsimilar(val, 1.f) || (val < 1))
+		{
+			step /= 10.f;
+		}
+		EPrefs->grid_cell_size -= step;
+	}
+	ExecCommand(COMMAND_UPDATE_GRID);
+	EContext.UI->RedrawScene();
+	return true;
+}
+
+CCommandVar CommandCreateSoundLib(CCommandVar p1, CCommandVar p2)
+{
+	SndLib = new CSoundManager();
+	return true;
+}
+
+CCommandVar CommandMuteSound(CCommandVar p1, CCommandVar p2)
+{
+	SndLib->MuteSounds(p1);
+	return true;
+}
+CCommandVar CommandMoveCameraTo(CCommandVar p1, CCommandVar p2)
+{
+	if (!EContext.UI->HasWindow<UIMoveToCamera>())
+		EContext.UI->Push(new UIMoveToCamera(), true);
+
+	return true;
+}
+
+CCommandVar ExecuteCommandList(const char* text)
+{
+	CCommandVar res = true;
+	IReader F((void*)text, xr_strlen(text));
+	while (!F.eof())
+	{
+		xr_string line, cmd, params, sp1, sp2;
+		F.r_string(line);
+		line = _Trim(line);
+		if (!line.empty())
+		{
+			if (line[0] == ';' || (line[0] == '/' && line[1] == '/'))
+			{
+				continue;
+			}
+			_GetItem(line.c_str(), 0, cmd, '(');
+			_GetItem(line.c_str(), 1, params, '(');
+			_GetItem(params.c_str(), 0, params, ')');
+			_GetItem(params.c_str(), 0, sp1, ',');
+			_GetItem(params.c_str(), 1, sp2, ',');
+			// parse cmd
+			xr_string cmd_name, sub_cmd_name;
+			_GetItem(cmd.c_str(), 0, cmd_name, '.');
+			_GetItem(cmd.c_str(), 1, sub_cmd_name, '.');
+
+			SECommand* CMD = FindCommandByName(cmd_name.c_str());
+			if (CMD)
+			{
+				SESubCommand* SUB = FindSubCommandByName(CMD, sub_cmd_name.c_str());
+				if (!sub_cmd_name.empty() && !SUB)
+				{
+					ELog.DlgMsg(mtError, "Can't find sub-command: '%s'", sub_cmd_name.c_str());
+					res = false;
+					break;
+				}
+				// parse params
+				CCommandVar p1, p2;
+				if (SUB)
+				{
+					p1 = SUB->p0;
+					p2 = SUB->p1;
+				}
+				ParseParam(sp1, p1);
+				ParseParam(sp2, p2);
+				// execute command
+				if (false == ExecCommand(CMD->idx, p1, p2))
+				{
+					ELog.DlgMsg(mtError, "Can't execute command: '%s'", cmd.c_str());
+					res = false;
+					break;
+				}
+			}
+			else
+			{
+				ELog.DlgMsg(mtError, "Can't find command: '%s'", cmd.c_str());
+				res = false;
+				break;
+			}
+		}
+	}
+	return res;
+}
+
+CCommandVar CommandExecuteCommandList(CCommandVar _p1, CCommandVar _p2)
+{
+	xr_string cmds_text = _p1;
+	return ExecuteCommandList(cmds_text.c_str());
+}
+
+CCommandVar CommandLogCommands(CCommandVar _p1, CCommandVar _p2)
+{
+	bAllowLogCommands = !_p1;
+	return true;
+}
+
+CCommandVar CommandRunMacro(CCommandVar p1, CCommandVar p2)
+{
+	xr_string fn;
+	if (p1.IsString())
+	{
+		fn = xr_string(p1);
+		IReader* F = FS.r_open(fn.c_str());
+		if (nullptr == F)
+		{
+			F = FS.r_open(_import_, fn.c_str());
+		}
+		if (F)
+		{
+			ExecCommand(COMMAND_EXECUTE_COMMAND_LIST, xr_string((const char*)F->pointer()));
+			FS.r_close(F);
+			return true;
+		}
+	}
+	else
+	{
+		SECommand* CMD = GetEditorCommands()[COMMAND_RUN_MACRO];
+		VERIFY(CMD);
+		u32 num = p1;
+		VERIFY(num < CMD->sub_commands.size());
+		SESubCommand* SUB = CMD->sub_commands[num];
+		fn = xr_string(SUB->p0);
+		return ExecCommand(COMMAND_RUN_MACRO, fn, p2);
+	}
+	return false;
+}
+
+CCommandVar CommandAssignMacro(CCommandVar p1, CCommandVar p2)
+{
+	xr_string fn = p2.IsString() ? xr_string(p2) : xr_string("");
+	if (p2.IsString())
+	{
+		if (0 == fn.find(FS.get_path(_import_)->m_Path))
+		{
+			fn = xr_string(fn.c_str() + xr_strlen(FS.get_path(_import_)->m_Path));
+		}
+		ECommands[COMMAND_RUN_MACRO]->sub_commands[p1]->p0 = fn;
+		return true;
+	}
+	else
+	{
+		if (EFS.GetOpenName(_import_, fn, false, nullptr, 2))
+		{
+			return ExecCommand(COMMAND_ASSIGN_MACRO, p1, fn);
+		}
+	}
+	return false;
+}
+
+void TUI::RegisterCommands()
+{
+	REGISTER_CMD_S		(COMMAND_INITIALIZE,			CommandInitialize);
+	REGISTER_CMD_S		(COMMAND_DESTROY,        		CommandDestroy);
+	REGISTER_CMD_SE		(COMMAND_EXIT,               	"Exit",					CommandExit,		true);
+	REGISTER_CMD_S		(COMMAND_QUIT,           		CommandQuit);
+	REGISTER_CMD_SE		(COMMAND_EDITOR_PREF,    		"Editor Preferences",	CommandEditorPrefs, false);
+
+    REGISTER_CMD_SE(COMMAND_WEATHER_PROPERTIES, "Lighting", CommandWeatherProperties, true);
+
+
+	REGISTER_CMD_SE	(COMMAND_SIMULATE,  			"Simulate",      		CommandSimulate, true);
+	REGISTER_CMD_SE	(COMMAND_USE_SIMULATE_POSITIONS,"Use Simulate Positions",CommandUseSimulatePositions, true);
+
+	REGISTER_SUB_CMD_SE	(COMMAND_CHANGE_ACTION,  		"Change Action",      	CommandChangeAction,false);
+		APPEND_SUB_CMD	("Select",						etaSelect,	0);
+		APPEND_SUB_CMD	("Add",							etaAdd,		0);
+		APPEND_SUB_CMD	("Move",						etaMove, 0);
+		APPEND_SUB_CMD	("Rotate",						etaRotate, 0);
+		APPEND_SUB_CMD	("Scale",						etaScale, 0);
+	REGISTER_SUB_CMD_END;
+	REGISTER_SUB_CMD_SE(COMMAND_CHANGE_AXIS, "Change Axis", CommandChangeAxis, false);
+		APPEND_SUB_CMD("X", etAxisX, 0);
+		APPEND_SUB_CMD("Y", etAxisY, 0);
+		APPEND_SUB_CMD("Z", etAxisZ, 0);
+		APPEND_SUB_CMD("ZX", etAxisZX, 0);
+	REGISTER_SUB_CMD_END;
+	REGISTER_CMD_S	    (COMMAND_SET_SETTINGS,			CommandSetSettings);
+	REGISTER_CMD_S	    (COMMAND_SOUND_EDITOR,   		CommandSoundEditor);
+	REGISTER_CMD_S	    (COMMAND_SYNC_SOUNDS,    		CommandSyncSounds);
+	REGISTER_CMD_S	    (COMMAND_SYNC_SOUNDS_HARD, 		CommandSyncSoundsHard);
+	REGISTER_CMD_S	    (COMMAND_IMAGE_EDITOR,   		CommandImageEditor); 
+	REGISTER_CMD_S	    (COMMAND_IMAGE_EDITOR_SELECT,	CommandImageEditorSelect);
+	REGISTER_CMD_S      (COMMAND_LIGHTANIM_EDITOR,      CommandLightAnimEditor);
+	REGISTER_CMD_S	    (COMMAND_MINIMAP_EDITOR,   		CommandMinimapEditor);
+	REGISTER_CMD_S	    (COMMAND_CHECK_TEXTURES,     	CommandCheckTextures);
+	REGISTER_CMD_S	    (COMMAND_REFRESH_TEXTURES,   	CommandRefreshTextures);	
+	REGISTER_CMD_S	    (COMMAND_RELOAD_TEXTURES,    	CommandReloadTextures);
+	REGISTER_CMD_S	    (COMMAND_UNLOAD_TEXTURES,    	CommandUnloadTextures);
+	REGISTER_CMD_S	    (COMMAND_EVICT_OBJECTS,      	CommandEvictObjects);
+	REGISTER_CMD_S	    (COMMAND_CHECK_MODIFIED,     	CommandCheckModified);
+	REGISTER_CMD_S	    (COMMAND_ICON_PICKER,   		CommandIconPicker);
+	REGISTER_CMD_SE	    (COMMAND_SHOW_PROPERTIES,    	"Show Properties",		CommandShowProperties, false);
+	REGISTER_CMD_S	    (COMMAND_UPDATE_PROPERTIES,  	CommandUpdateProperties);
+	REGISTER_SUB_CMD_SE (COMMAND_ZOOM_EXTENTS,     		"Zoom",					CommandZoomExtents,false);
+		APPEND_SUB_CMD	("Extent",						0,0);
+		APPEND_SUB_CMD	("Selected",					1,0);
+	REGISTER_SUB_CMD_END;
+	REGISTER_CMD_SE	    (COMMAND_MOVE_CAMERA_TO,        "Scene\\Move Camera To",CommandMoveCameraTo,false);
+	REGISTER_CMD_SE	    (COMMAND_TOGGLE_RENDER_WIRE,	"Toggle Wireframe",		CommandToggleRenderWire,			false);
+	REGISTER_CMD_CE	    (COMMAND_BREAK_LAST_OPERATION,	"Break Last Operation",	this,TUI::CommandBreakLastOperation,false);
+	REGISTER_CMD_SE	    (COMMAND_TOGGLE_SAFE_RECT,   	"Toggle Safe Rect",		CommandToggleSafeRect,false);
+	REGISTER_CMD_SE	    (COMMAND_TOGGLE_GRID,        	"Toggle Grid",			CommandToggleGrid,false);
+	REGISTER_CMD_S	    (COMMAND_UPDATE_GRID,        	CommandUpdateGrid);
+	REGISTER_CMD_S	    (COMMAND_GRID_NUMBER_OF_SLOTS,	CommandGridNumberOfSlots);
+	REGISTER_SUB_CMD_SE (COMMAND_GRID_SLOT_SIZE,     	"Change Grid Size",		CommandGridSlotSize,false);
+		APPEND_SUB_CMD	("Decrease",					0,0);
+		APPEND_SUB_CMD	("Increase",					1,0);
+	REGISTER_SUB_CMD_END;
+	REGISTER_CMD_S	    (COMMAND_CREATE_SOUND_LIB,   	CommandCreateSoundLib);
+	REGISTER_CMD_S	    (COMMAND_MUTE_SOUND,         	CommandMuteSound);
+	REGISTER_CMD_S	    (COMMAND_EXECUTE_COMMAND_LIST, 	CommandExecuteCommandList);
+	REGISTER_CMD_S	    (COMMAND_LOG_COMMANDS, 			CommandLogCommands);
+	REGISTER_SUB_CMD_SE (COMMAND_RUN_MACRO,     		"Run Macro",			CommandRunMacro,false);
+		APPEND_SUB_CMD	("Slot #1",						xr_string(""),0);
+		APPEND_SUB_CMD	("Slot #2",						xr_string(""),0);
+		APPEND_SUB_CMD	("Slot #3",						xr_string(""),0);
+		APPEND_SUB_CMD	("Slot #4",						xr_string(""),0);
+		APPEND_SUB_CMD	("Slot #5",						xr_string(""),0);
+		APPEND_SUB_CMD	("Slot #6",						xr_string(""),0);
+		APPEND_SUB_CMD	("Slot #7",						xr_string(""),0);
+		APPEND_SUB_CMD	("Slot #8",						xr_string(""),0);
+	REGISTER_SUB_CMD_END;
+	REGISTER_CMD_S	    (COMMAND_ASSIGN_MACRO, 			CommandAssignMacro);
+}                                                                        
+
+//---------------------------------------------------------------------------
+bool TUI::ApplyShortCut(u32 Key, TShiftState Shift)
+{
+	VERIFY(m_bReady);
+
+	if (ApplyGlobalShortCut(Key, Shift))
+	{
+		return true;
+	}
+
+	if (Key == SDL_SCANCODE_ESCAPE)
+	{
+		ExecCommand(COMMAND_CHANGE_ACTION, etaSelect);
+		return true;
+	}
+
+	xr_shortcut SC;
+	SC.key = Key;
+	SC.ext.assign(u8((Shift & ssShift ? xr_shortcut::flShift : 0) | (Shift & ssCtrl ? xr_shortcut::flCtrl : 0) | (Shift & ssAlt ? xr_shortcut::flAlt : 0)));
+	SESubCommand* SUB = FindCommandByShortcut(SC);
+
+	if (!SUB || SUB->parent->global_shortcut)
+	{
+		return false;
+	}
+
+	return ExecCommand(SC);
+}
+
+bool TUI::ApplyGlobalShortCut(u32 Key, TShiftState Shift)
+{
+	VERIFY(m_bReady);
+
+	xr_shortcut SC;
+	SC.key = Key;
+	SC.ext.assign(u8((Shift & ssShift ? xr_shortcut::flShift : 0) | (Shift & ssCtrl ? xr_shortcut::flCtrl : 0) | (Shift & ssAlt ? xr_shortcut::flAlt : 0)));
+
+	if (UIKeyPressForm::SetResult(SC))
+	{
+		return true;
+	}
+
+	SESubCommand* SUB = FindCommandByShortcut(SC);
+
+	if (!SUB || !SUB->parent->global_shortcut)
+	{
+		return false;
+	}
+
+	return ExecCommand(SUB->parent->idx, SUB->p0, SUB->p1);
+}

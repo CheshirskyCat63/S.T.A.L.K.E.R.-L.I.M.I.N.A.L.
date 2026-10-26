@@ -1,0 +1,286 @@
+#include "StdAfx.h"
+#include "UIDragDropReferenceList.h"
+#include "UICellItem.h"
+#include "UICellItemFactory.h"
+#include "../../xrUI/Widgets/UIStatic.h"
+#include "../Inventory.h"
+#include "../InventoryOwner.h"
+#include "../Actor.h"
+#include "../actor_defs.h"
+#include "UIInventoryUtilities.h"
+#include "../../xrEngine/xr_input.h"
+#include "../../xrUI/UICursor.h"
+#include "UICellItemFactory.h"
+
+using namespace InventoryUtilities;
+
+CUIDragDropReferenceList::CUIDragDropReferenceList()
+{
+	AddCallbackStr("cell_item_reference", WINDOW_LBUTTON_DB_CLICK, CUIWndCallback::void_function(this, &CUIDragDropReferenceList::OnItemDBClick));
+}
+CUIDragDropReferenceList::~CUIDragDropReferenceList()
+{
+}
+void CUIDragDropReferenceList::Initialize()
+{
+	for(int i=0; i<m_container->CellsCapacity().x; i++)
+	{
+		m_references.push_back(new CUI3dStatic());
+		Fvector2 pos = Fvector2().set((m_container->CellSize().x+m_container->CellsSpacing().x)*i,0);
+		m_references.back()->SetAutoDelete(true);
+		m_references.back()->SetWndPos(pos);
+		m_references.back()->SetWndSize(Fvector2().set(m_container->CellSize().x, m_container->CellSize().y));
+		AttachChild(m_references.back());
+		m_references.back()->SetWindowName("cell_item_reference");
+		Register(m_references.back());
+	}
+}
+void CUIDragDropReferenceList::SetItem(CUICellItem* itm)
+{
+	inherited::SetItem(itm);
+}
+
+bool CUIDragDropReferenceList::SetItem(CUICellItem* itm, Fvector2 abs_pos)
+{
+	const Ivector2 dest_cell_pos = m_container->PickCell(abs_pos);
+
+	Ivector2 ItmGridSize = itm->GetGridSize();
+	bool bGridIsFull = m_container->IsRoomFree(dest_cell_pos, ItmGridSize);
+
+	if (m_container->ValidCell(dest_cell_pos) && bGridIsFull) {
+		SetItem(itm, dest_cell_pos);
+	} else if (dest_cell_pos.x != -1 && dest_cell_pos.y != -1) {
+		CUICell& CellRef = GetCellAt(dest_cell_pos);
+		CUICellItem* old_itm = CellRef.m_item;
+
+		if (ItmGridSize.x > m_container->m_cellsCapacity.x || ItmGridSize.y > m_container->m_cellsCapacity.y) {
+			// FX: Big grid
+			return false;
+		}
+
+		RemoveItem(old_itm, false);
+		SetItem(itm, dest_cell_pos);
+	}
+
+	return true;
+}
+
+bool CUIDragDropReferenceList::SetItemAtQuickSlotCell(CUICellItem* itm, u8 slotIndex)
+{
+	const Ivector2 dest_cell_pos = Ivector2().set(slotIndex, 0);
+	if (!m_container->ValidCell(dest_cell_pos))
+	{
+		return false;
+	}
+
+	const Ivector2 itmGridSize = itm->GetGridSize();
+	const bool hasRoom = m_container->IsRoomFree(dest_cell_pos, itmGridSize);
+	if (hasRoom)
+	{
+		SetItem(itm, dest_cell_pos);
+	}
+	else
+	{
+		CUICell& cellRef = GetCellAt(dest_cell_pos);
+		CUICellItem* old_itm = cellRef.m_item;
+
+		if (itmGridSize.x > m_container->m_cellsCapacity.x || itmGridSize.y > m_container->m_cellsCapacity.y)
+		{
+			return false;
+		}
+
+		if (old_itm != nullptr)
+		{
+			RemoveItem(old_itm, false);
+		}
+		SetItem(itm, dest_cell_pos);
+	}
+
+	return true;
+}
+
+void CUIDragDropReferenceList::SetItem(CUICellItem* itm, Ivector2 cell_pos)
+{
+	CUI3dStatic *ref = m_references[cell_pos.x];
+	static const bool enable3DIcons = EngineExternal()[EEngineExternalGame::Enable3DIcons];
+	if (enable3DIcons)
+	{
+		const PIItem iitem = static_cast<PIItem>(itm->m_pData);
+		ref->SetIconVisual(iitem->m_3d_static_visual_name);
+		ref->SetBonesVisible(iitem->object().Visual()->dcast_PKinematics());
+		ref->SetScaleFactor(iitem->m_3d_static_scale);
+		ref->SetIconOffset(iitem->IconOffset);
+		Fvector fRot = iitem->m_3d_static_rotate;
+		if (GetVerticalPlacement())
+		{
+			fRot.x += deg2rad(90.f);
+			fRot.y -= deg2rad(180.f);
+		}
+		ref->SetXYZ(fRot);
+		itm->SetIconVisual(iitem->m_3d_static_visual_name);
+		itm->SetBonesVisible(iitem->object().Visual()->dcast_PKinematics());
+		itm->SetScaleFactor(iitem->m_3d_static_scale);
+		itm->SetIconOffset(iitem->IconOffset);
+		if (GetVerticalPlacement())
+		{
+			fRot.x += deg2rad(90.f);
+			fRot.y -= deg2rad(180.f);
+		}
+		itm->SetXYZ(fRot);
+	}
+	else
+		ref->SetVisual(nullptr);
+
+	ref->SetShader(itm->GetShader());
+	ref->SetTextureRect(itm->GetTextureRect());
+	ref->TextureOn();
+	ref->SetTextureColor(color_rgba(255,255,255,255));
+	ref->SetStretchTexture(true);
+
+	CUICell& C = m_container->GetCellAt(cell_pos);
+	if(C.m_item!=itm)
+	{
+		m_container->PlaceItemAtPos(itm, cell_pos);
+		itm->SetWindowName("cell_item");
+		Register(itm);
+		itm->SetOwnerList(this);
+	}
+}
+
+CUICellItem* CUIDragDropReferenceList::RemoveItem(CUICellItem* itm, bool force_root)
+{
+	Ivector2 vec2 = m_container->GetItemPos(itm);
+	if(vec2.x!=-1&&vec2.y!=-1)
+	{
+		u8 index = u8(vec2.x);
+		xr_strcpy(ACTOR_DEFS::g_quick_use_slots[index], "");
+		m_references[index]->SetTextureColor(color_rgba(255,255,255,0));
+	}
+	inherited::RemoveItem(itm, force_root);
+	return nullptr;
+}
+
+void CUIDragDropReferenceList::LoadItemTexture(const char* section, Ivector2 cell_pos)
+{
+	CUI3dStatic* ref = m_references[cell_pos.x];
+	InventoryIconParams icons_struct = GetInventoryIconParams(section);
+	static const bool enable3DIcons = EngineExternal()[EEngineExternalGame::Enable3DIcons];
+	if (enable3DIcons)
+	{
+		ref->SetIconVisual(icons_struct._3d_static_visual);
+		ref->SetXYZ(icons_struct._3d_static_rotate);
+        ref->SetScaleFactor(icons_struct._3d_static_scale);
+        ref->SetIconOffset(icons_struct.IconOffset);
+	}
+	else
+		ref->SetVisual(nullptr);
+
+	ref->SetShader(GetEquipmentIconsShader(icons_struct.icons_texture));
+
+	float scaleIcon = icons_struct.scaleIcon;
+	Frect texture_rect;
+	texture_rect.x1 = icons_struct.inv_grid_x * INV_GRID_WIDTH(scaleIcon);
+	texture_rect.y1 = icons_struct.inv_grid_y * INV_GRID_HEIGHT(scaleIcon);
+	texture_rect.x2 = icons_struct.inv_grid_width * INV_GRID_WIDTH(scaleIcon);
+	texture_rect.y2 = icons_struct.inv_grid_height  * INV_GRID_HEIGHT(scaleIcon);
+	texture_rect.rb.add(texture_rect.lt);
+	ref->SetTextureRect(texture_rect);
+	ref->TextureOn();
+	ref->SetTextureColor(color_rgba(255,255,255,255));
+	ref->SetStretchTexture(true);
+}
+
+void CUIDragDropReferenceList::ReloadReferences(CInventoryOwner* pActor)
+{
+	if (!pActor)
+		return;
+
+	// Full list ClearAll: drag end + generation bump + observer invalidation + owned cell destroy
+	ClearAll(true);
+
+	for(u8 i=0; i<m_container->CellsCapacity().x; i++)
+	{
+		CUI3dStatic* ref = m_references[i];
+		const char* item_name = ACTOR_DEFS::g_quick_use_slots[i];
+		if(item_name && xr_strlen(item_name))
+		{
+			PIItem itm = pActor->inventory().GetAny(item_name);
+			if(itm)
+			{
+				SetItem(create_cell_item(itm), Ivector2().set(i, 0));
+			}
+			else
+			{
+				LoadItemTexture(item_name, Ivector2().set(i, 0));
+				ref->SetTextureColor(color_rgba(255,255,255,100));
+			}
+		}
+		else
+		{
+			ref->SetTextureColor(color_rgba(255,255,255,0));
+		}
+	}
+}
+
+void CUIDragDropReferenceList::OnItemDBClick(CUIWindow* w, void* pData)
+{
+	CUIStatic* ref = w->ui_cast_static();
+	ITEMS_REFERENCES_VEC_IT it = std::find(m_references.begin(), m_references.end(), ref);
+	if (it != m_references.end())
+	{
+		u8 index = u8(it - m_references.begin());
+		CObject* current_entity = Level().CurrentViewEntity();
+		if (CActor* actor = current_entity != nullptr ? current_entity->cast_actor() : nullptr)
+		{
+			PIItem itm = actor->inventory().GetAny(ACTOR_DEFS::g_quick_use_slots[index]);
+			if (itm)
+			{
+				inherited::RemoveItem(GetCellAt(Ivector2().set(index, 0)).m_item, false);
+			}
+		}
+
+		xr_strcpy(ACTOR_DEFS::g_quick_use_slots[index], "");
+		(*it)->SetTextureColor(color_rgba(255, 255, 255, 0));
+	}
+}
+
+void CUIDragDropReferenceList::OnItemDrop(CUIWindow* w, void* pData)
+{
+	OnItemSelected(w, pData);
+	CUICellItem* itm = w->ui_cast_cell_item();
+	VERIFY(itm->OwnerList() == itm->OwnerList());
+
+	if (m_f_item_drop && m_f_item_drop(itm))
+	{
+		DestroyDragItem();
+		return;
+	}
+
+	CUIDragDropListEx* old_owner = itm->OwnerList();
+	CUIDragDropListEx* new_owner = m_drag_item->BackList();
+	if (old_owner && new_owner && old_owner != new_owner)
+	{
+		inherited::OnItemDrop(w, pData);
+		return;
+	}
+
+	CObject* current_entity = Level().CurrentViewEntity();
+	if (CActor* actor = current_entity != nullptr ? current_entity->cast_actor() : nullptr)
+	{
+		Ivector2 vec = PickCell(GetUICursor().GetCursorPosition());
+		if (vec.x != -1 && vec.y != -1)
+		{
+			Ivector2 vec2 = m_container->GetItemPos(itm);
+			if (vec2.x != -1 && vec2.y != -1)
+			{
+				u8 index = u8(vec2.x);
+				shared_str tmp = ACTOR_DEFS::g_quick_use_slots[vec.x];
+				xr_strcpy(ACTOR_DEFS::g_quick_use_slots[vec.x], ACTOR_DEFS::g_quick_use_slots[index]);
+				xr_strcpy(ACTOR_DEFS::g_quick_use_slots[index], tmp.c_str());
+				ReloadReferences(actor);
+				return;
+			}
+		}
+	}
+	DestroyDragItem();
+}

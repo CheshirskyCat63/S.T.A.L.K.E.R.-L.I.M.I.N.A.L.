@@ -1,0 +1,63 @@
+set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/finders" ${CMAKE_MODULE_PATH})
+set(CMAKE_MODULE_PATHEX "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules")
+
+include("${CMAKE_MODULE_PATHEX}/SDL3.cmake")
+include("${CMAKE_MODULE_PATHEX}/LuaJIT.cmake")
+include("${CMAKE_MODULE_PATHEX}/LuaBind.cmake")
+include("${CMAKE_MODULE_PATHEX}/Ogg.cmake")
+include("${CMAKE_MODULE_PATHEX}/Vorbis.cmake")
+include("${CMAKE_MODULE_PATHEX}/Theora.cmake")
+include("${CMAKE_MODULE_PATHEX}/FreeType.cmake")
+include("${CMAKE_MODULE_PATHEX}/nvtt.cmake")
+include("${CMAKE_MODULE_PATHEX}/RedImage.cmake")
+include("${CMAKE_MODULE_PATHEX}/yamlcpp.cmake")
+include("${CMAKE_MODULE_PATHEX}/lzo.cmake")
+include("${CMAKE_MODULE_PATHEX}/tbb.cmake")
+include("${CMAKE_MODULE_PATHEX}/lunasvg.cmake")
+include("${CMAKE_MODULE_PATHEX}/DirectXMesh.cmake")
+include("${CMAKE_MODULE_PATHEX}/DirectXTex.cmake")
+include("${CMAKE_MODULE_PATHEX}/SteamWorks.cmake")
+
+if (IXRAY_PROFILER_TRACY)
+    include("${CMAKE_MODULE_PATHEX}/Tracy.cmake")
+endif()
+
+if (IXRAY_EDITORS)
+    include("${CMAKE_MODULE_PATHEX}/ImGuiNodeEditor.cmake")
+endif()
+
+# Resonance Audio 3rd
+include("${CMAKE_MODULE_PATHEX}/eigen.cmake")
+include("${CMAKE_MODULE_PATHEX}/pffft.cmake")
+
+if (IXRAY_MP)
+    include("${CMAKE_MODULE_PATHEX}/GameNetworkingSockets.cmake")
+    include("${CMAKE_MODULE_PATHEX}/Opus.cmake")
+    include("${CMAKE_MODULE_PATHEX}/SpeexDSP.cmake")
+endif()
+
+if(WIN32)
+    include("${CMAKE_MODULE_PATHEX}/amd_ags.cmake")
+    include("${CMAKE_MODULE_PATHEX}/discord_game_sdk.cmake")
+    include("${CMAKE_MODULE_PATHEX}/FSR3.cmake")
+    include("${CMAKE_MODULE_PATHEX}/NGX.cmake")
+    include("${CMAKE_MODULE_PATHEX}/WindowsSDK.cmake")
+elseif(LINUX)
+    include("${CMAKE_MODULE_PATHEX}/DXVK.cmake")
+endif()
+
+# Headers only libraries
+include("${CMAKE_MODULE_PATHEX}/FastDynamicCast.cmake")
+include("${CMAKE_MODULE_PATHEX}/magic_enum.cmake")
+include("${CMAKE_MODULE_PATHEX}/sse2neon.cmake")
+include("${CMAKE_MODULE_PATHEX}/nlohmann_json.cmake")
+include("${CMAKE_MODULE_PATHEX}/amd_adl.cmake")
+include("${CMAKE_MODULE_PATHEX}/nvapi.cmake")
+include("${CMAKE_MODULE_PATHEX}/stb.cmake")
+
+if(WIN32)
+    include("${CMAKE_MODULE_PATHEX}/dirent.cmake")
+    include("${CMAKE_MODULE_PATHEX}/amd_antilag.cmake")
+endif()
+
+include("${CMAKE_MODULE_PATHEX}/FileWatch.cmake")

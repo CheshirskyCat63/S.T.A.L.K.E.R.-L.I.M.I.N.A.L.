@@ -1,0 +1,51 @@
+#pragma once
+
+class ENGINE_API IInputReceiver
+{
+public:
+	virtual ~IInputReceiver() = default;
+
+	void			IR_GetLastMouseDelta			(Ivector2& p);
+	void			IR_GetMousePosScreen			(Ivector2& p);
+	void			IR_GetMousePosReal				(Ivector2 &p);
+	void			IR_GetMousePosIndependent		(Fvector2 &f);
+	void			IR_GetMousePosIndependentCrop	(Fvector2 &f);
+	bool			IR_GetKeyState					(int dik);
+	bool			IR_GetGamepadKeyState			(int id);
+	bool			IR_GetBtnState					(int btn);
+	void			IR_Capture						(void);
+	void			IR_Release						(void);
+
+	virtual void	IR_OnDeactivate					(void);
+	virtual void	IR_OnActivate					(void);
+
+	virtual void	IR_OnMousePress					(int btn)		{};
+	virtual void	IR_OnMouseRelease				(int btn)		{};
+	virtual void	IR_OnMouseHold					(int btn)		{};
+	virtual void	IR_OnMouseWheel					(int direction)	{};
+	virtual void	IR_OnMouseMove					(int x, int y)	{};
+	virtual void	IR_OnMouseStop					(int x, int y)	{};
+
+	virtual void	IR_OnKeyboardPress				(int dik)		{};
+	virtual void	IR_OnKeyboardRelease			(int dik)		{};
+	virtual void	IR_OnKeyboardHold				(int dik)		{};
+    virtual void	IR_GamepadUpdateStick           (int id, Fvector2 value) {};
+    virtual void	IR_GamepadKeyPress              (int id) {};
+    virtual void	IR_GamepadKeyRelease            (int id) {};
+	virtual void	IR_GamepadKeyHold				(int id) {};
+	virtual void	IR_OnGyroscopeMove				(Fvector3 value)	{};
+	virtual void	IR_OnTouchpadMove				(Fvector2 value)	{};
+};
+
+ENGINE_API extern float			psMouseSens;
+ENGINE_API extern float			psMouseUISens;
+ENGINE_API extern float			psMouseSensScale;
+ENGINE_API extern bool			psMouseInvert;
+
+ENGINE_API extern float			psGamepadSens;
+ENGINE_API extern bool			psGamepadInvert;
+
+ENGINE_API extern bool			psGyroscopeInvertX;
+ENGINE_API extern bool			psGyroscopeInvertY;
+
+ENGINE_API extern float			psTouchpadSens;

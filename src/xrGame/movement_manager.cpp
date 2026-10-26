@@ -1,0 +1,617 @@
+////////////////////////////////////////////////////////////////////////////
+//	Module 		: movement_manager.cpp
+//	Created 	: 02.10.2001
+//  Modified 	: 12.11.2003
+//	Author		: Dmitriy Iassenev
+//	Description : Movement manager
+////////////////////////////////////////////////////////////////////////////
+
+#include "StdAfx.h"
+#include "pch_script.h"
+#include "movement_manager.h"
+#include "movement_manager_space.h"
+#include "game_location_selector.h"
+#include "level_location_selector.h"
+#include "game_path_manager.h"
+#include "level_path_manager.h"
+#include "detail_path_manager.h"
+#include "patrol_path_manager.h"
+#include "xrMessages.h"
+#include "ai_object_location.h"
+#include "Creature.h"
+#include "location_manager.h"
+#include "level_path_builder.h"
+#include "detail_path_builder.h"
+
+// Lain: added 
+#include "steering_behaviour.h"
+#include "Actor.h"
+#include "Level.h"
+#include "LevelInspector.h"
+
+using namespace MovementManager;
+
+const float verify_distance = 15.f;
+int g_ALDrawPaths = 0;
+
+CMovementManager::CMovementManager	(CCreature *object)
+{
+	VERIFY						(object);
+	m_object					= object;
+
+	m_nearest_objects.reserve(128);
+}
+
+CMovementManager::~CMovementManager	()
+{
+	xr_delete					(m_base_game_selector		);
+	xr_delete					(m_base_level_selector		);
+	
+	xr_delete					(m_restricted_object		);
+	xr_delete					(m_location_manager			);
+	
+	xr_delete					(m_game_location_selector	);
+	xr_delete					(m_game_path_manager		);
+	xr_delete					(m_level_path_manager		);
+	xr_delete					(m_detail_path_manager		);
+	xr_delete					(m_patrol_path_manager		);
+
+	xr_delete					(m_level_path_builder		);
+	xr_delete					(m_detail_path_builder		);
+}
+
+void CMovementManager::Load(const char* section)
+{
+	m_restricted_object = create_restricted_object();
+	m_location_manager = new CLocationManager(m_object);
+
+	m_base_game_selector = new SGameVertex(locations().vertex_types());
+	m_base_level_selector = new CBaseParameters();
+
+	m_game_location_selector = new CGameLocationSelector(m_restricted_object, m_location_manager);
+	m_game_path_manager = new CGamePathManager(m_restricted_object);
+	m_level_path_manager = new CLevelPathManager(m_restricted_object);
+	m_detail_path_manager = new CDetailPathManager(m_restricted_object);
+	m_patrol_path_manager = new CPatrolPathManager(m_restricted_object, m_object);
+
+	m_level_path_builder = new CLevelPathBuilder(this);
+	m_detail_path_builder = new CDetailPathBuilder(this);
+
+	extrapolate_path(false);
+
+	m_wait_for_distributed_computation = false;
+
+	locations().Load(section);
+}
+
+void CMovementManager::reinit		()
+{
+	m_speed							= 0.f;
+	m_path_type						= ePathTypeNoPath;
+	m_path_state					= ePathStateDummy;
+	m_path_actuality				= true;
+	m_speed							= 0.f;
+	m_old_desirable_speed			= 0.f;
+	m_build_at_once					= false;
+
+	enable_movement					(true);
+	game_selector().reinit			(&ai().game_graph());
+	detail().reinit					();
+	game_path().reinit				(&ai().game_graph());
+	level_path().reinit				(ai().get_level_graph());
+	patrol().reinit					();
+
+	game_selector().set_dest_path	(game_path().m_path);
+}
+
+void CMovementManager::reload		(const char* section)
+{
+	locations().reload				(section);
+}
+
+bool CMovementManager::net_Spawn	(CSE_Abstract* data)
+{
+	// Level-specific limits apply to stalkers and the shared monster path builder.
+	*base_level_params() = CBaseParameters();
+	const CInifile* Settings = Level().pLevel;
+	if (Settings && Settings->section_exist("ai_path_limits"))
+	{
+		base_level_params()->UsePathLimits = true;
+		const bool IsMonster = m_object->cast_base_monster() != nullptr;
+		const char* LengthKey = IsMonster ? "monster_max_path_length" : "npc_max_path_length";
+		const float DefaultLength = IsMonster ? 100.f : 200.f;
+		float Length = READ_IF_EXISTS(Settings, r_float, "ai_path_limits", LengthKey, DefaultLength);
+		if (!_valid(Length) || Length < 0.f)
+		{
+			Msg("! Invalid [ai_path_limits] %s; using %.1f meters", LengthKey, DefaultLength);
+			Length = DefaultLength;
+		}
+		base_level_params()->MaxPathLength = Length > 0.f ? Length : type_max(float);
+
+		const u32 Iterations = READ_IF_EXISTS(Settings, r_u32, "ai_path_limits", "max_iterations", 8192);
+		const u32 Nodes = READ_IF_EXISTS(Settings, r_u32, "ai_path_limits", "max_visited_nodes", 8192);
+		base_level_params()->max_iteration_count = Iterations ? Iterations : u32(-1);
+		base_level_params()->max_visited_node_count = Nodes ? Nodes : u32(-1);
+	}
+	return restrictions().net_Spawn(data);
+}
+
+void CMovementManager::net_Destroy	()
+{
+	level_path_builder().remove		();
+	detail_path_builder().remove	();
+	restrictions().net_Destroy		();
+}
+
+CMovementManager::EPathType CMovementManager::path_type() const
+{
+	VERIFY					(m_path_type != MovementManager::ePathTypeDummy);
+	return					(m_path_type);
+}
+
+void CMovementManager::set_game_dest_vertex		(const GameGraph::_GRAPH_ID &game_vertex_id)
+{
+	game_path().set_dest_vertex(game_vertex_id);
+	m_path_actuality		= m_path_actuality && game_path().actual();
+}
+
+GameGraph::_GRAPH_ID CMovementManager::game_dest_vertex_id() const
+{
+	return					(GameGraph::_GRAPH_ID(game_path().dest_vertex_id()));
+}
+
+void CMovementManager::set_level_dest_vertex	(u32 const& level_vertex_id)
+{
+	VERIFY2							(restrictions().accessible(level_vertex_id),*object().cName());
+	level_path().set_dest_vertex	(level_vertex_id);
+	m_path_actuality				= m_path_actuality && level_path().actual();
+	if (m_path_actuality && m_path_state == ePathStatePathCompleted) {
+		m_path_actuality = (m_object->ai_location().level_vertex_id() == level_dest_vertex_id());
+	}
+}
+
+u32	 CMovementManager::level_dest_vertex_id		() const
+{
+	return					(level_path().dest_vertex_id());
+}
+
+const xr_vector<DetailPathManager::STravelPathPoint>	&CMovementManager::path	() const
+{
+	return					(detail().path());
+}
+
+void CMovementManager::update_path				()
+{
+	PROF_EVENT("Build Path::update")
+	if (!wait_for_distributed_computation() && base_level_params()->UsePathLimits)
+	{
+		level_path().MaintainPathCache(enabled() && !path_completed() ? level_path().dest_vertex_id() : u32(-1));
+	}
+	UpdatePathDebug();
+
+	if (!enabled() || wait_for_distributed_computation())
+		return;
+
+	if (!game_path().evaluator())
+		game_path().set_evaluator	(base_game_params());
+
+	if (!level_path().evaluator())
+		level_path().set_evaluator	(base_level_params());
+
+#pragma todo("Optimize this in case of slowdown or not intended behaviour")
+	if (!restrictions().actual()) {
+		m_path_actuality	= false;
+	}
+
+	restrictions().actual	(true);
+
+	if (!actual()) {
+
+		game_path().make_inactual();
+		level_path().make_inactual();
+		patrol().make_inactual();
+		switch (m_path_type) {
+			case ePathTypeGamePath : {
+				m_path_state	= ePathStateSelectGameVertex;
+				break;
+			}
+			case ePathTypeLevelPath :
+			{
+				m_path_state	= ePathStateBuildLevelPath;
+				ILevelGraph& LevelGraph = ai().level_graph();
+
+				if (!LevelGraph.valid_vertex_id(level_path().dest_vertex_id()))
+				{
+					shared_str ObjName = object().Name();
+#ifndef MASTER_GOLD
+					Msg("! Invalid dest level vertex id in object: %s", *ObjName);
+#endif // !MASTER_GOLD
+
+
+					u32 VertexID = LevelGraph.vertex_id(Actor()->Position());
+
+					if (!LevelGraph.valid_vertex_id(VertexID))
+					{
+#ifndef MASTER_GOLD
+						Msg("! ###DITRYHACK### Set dest vertex for object: %s at 1", *ObjName);
+#endif // !MASTER_GOLD
+						VertexID = 1;
+					}
+					level_path().set_dest_vertex(VertexID);
+				}
+
+				if (!restrictions().accessible(level_path().dest_vertex_id()))
+				{
+					Fvector							temp;
+					level_path().set_dest_vertex	(restrictions().accessible_nearest(LevelGraph.vertex_position(level_path().dest_vertex_id()),temp));
+					detail().set_dest_position		(temp);
+				}
+				else if (!restrictions().accessible(detail().dest_position()))
+				{
+					detail().set_dest_position(LevelGraph.vertex_position(level_path().dest_vertex_id()));
+				}
+				break;
+			}
+			case ePathTypePatrolPath : {
+//				Msg				("[%6d][%s] actuality is false",Device.dwFrame,*object().cName());
+				m_path_state	= ePathStateSelectPatrolPoint;
+				break;
+			}
+			case ePathTypeNoPath : {
+				m_path_state	= ePathStateDummy;
+				break;
+			}
+			default :			NODEFAULT;
+		}
+		m_path_actuality	= true;
+	}
+
+	switch (m_path_type) {
+		case ePathTypeGamePath : {
+			process_game_path	();
+			break;
+		}
+		case ePathTypeLevelPath : {
+			process_level_path	();
+			break;
+		}
+		case ePathTypePatrolPath : {
+			process_patrol_path();
+			break;
+		}
+		case ePathTypeNoPath : {
+			break;
+		}
+		default :				NODEFAULT;
+	}
+
+	UpdatePathDebug();
+
+#ifdef USE_FREE_IN_RESTRICTIONS
+	if (restrictions().accessible(object().Position()))
+		verify_detail_path		();
+#endif // USE_FREE_IN_RESTRICTIONS
+
+	m_build_at_once				= false;
+}
+
+bool CMovementManager::actual_all				() const
+{
+	if (!m_path_actuality)
+		return			(false);
+	switch (m_path_type) {
+		case ePathTypeGamePath : 
+			return			(
+				game_path().actual() && 
+				level_path().actual() &&
+				detail().actual()
+			);
+		case ePathTypeLevelPath :
+			return			(
+				level_path().actual() &&
+				detail().actual()
+			);
+		case ePathTypePatrolPath :
+			return			(
+				patrol().actual() && 
+				level_path().actual() &&
+				detail().actual()
+			);
+		case ePathTypeNoPath :
+			return			(
+				detail().actual()
+			);
+		default : NODEFAULT;
+	}
+#ifdef DEBUG
+	return					(true);
+#endif
+}
+
+void CMovementManager::teleport					(u32 game_vertex_id)
+{
+	NET_Packet				net_packet;
+	GameGraph::_GRAPH_ID	_game_vertex_id = (GameGraph::_GRAPH_ID)game_vertex_id;
+	u32						_level_vertex_id = ai().game_graph().vertex(_game_vertex_id)->level_vertex_id();
+	Fvector					position = ai().game_graph().vertex(_game_vertex_id)->level_point();
+	object().u_EventGen		(net_packet,GE_TELEPORT_OBJECT,object().ID());
+	net_packet.w			(&_game_vertex_id,sizeof(_game_vertex_id));
+	net_packet.w			(&_level_vertex_id,sizeof(_level_vertex_id));
+	net_packet.w_vec3		(position);
+	Level().Send			(net_packet,net_flags(true,true));
+}
+
+void CMovementManager::clear_path				()
+{
+	m_detail_path_manager->m_path.clear	();
+	detail_path_builder().remove		();
+}
+
+bool CMovementManager::distance_to_destination_greater	(const float &distance_to_check) const
+{
+	if (path().size() < 2)
+		return				(true);
+
+	if (path_completed())
+		return				(true);
+
+	float					accumulator = 0.f;
+	for (u32 i = detail().curr_travel_point_index(), n= (u32)detail().path().size()-1; i<n; ++i) {
+		accumulator			+= detail().path()[i].position.distance_to(detail().path()[i+1].position);
+		if (accumulator >= distance_to_check)
+			return			(true);
+	}
+
+	return					(false);
+}
+
+#ifdef USE_FREE_IN_RESTRICTIONS
+void CMovementManager::verify_detail_path		()
+{
+	if (detail().path().empty() || !detail().actual() || detail().completed(detail().dest_position()))
+		return;
+
+	if (restrictions().out_restrictions().size())
+		return;
+
+	float distance = 0.f;
+	for (u32 i=detail().curr_travel_point_index() + 1, n=detail().path().size(); i<n; ++i) {
+		if (!restrictions().accessible(detail().path()[i].position,EPS_L)) {
+			m_path_actuality	= false;
+			return;
+		}
+
+		distance	+= detail().path()[i].position.distance_to(detail().path()[i-1].position);
+		if (distance >= verify_distance)
+			break;
+	}
+}
+#endif // USE_FREE_IN_RESTRICTIONS
+
+void CMovementManager::on_restrictions_change	()
+{
+	m_path_actuality				= false;
+	level_path_builder().remove		();
+	detail_path_builder().remove	();
+	level_path().on_restrictions_change	();
+}
+
+bool CMovementManager::can_use_distributed_computations() const
+{
+	return !m_build_at_once && !object().getDestroy();
+}
+
+void CMovementManager::on_frame					(CPHMovementControl *movement_control, Fvector &dest_position)
+{
+	if	(
+			enabled() &&
+			(m_path_state != ePathStatePathVerification) &&
+			(m_path_state != ePathStatePathCompleted)
+		)
+		update_path					();
+			
+	move_along_path					(movement_control,dest_position,object().client_update_fdelta());
+}
+
+void CMovementManager::on_travel_point_change	(const u32 &previous_travel_point_index)
+{
+	detail().on_travel_point_change	(previous_travel_point_index);
+}
+
+void CMovementManager::enable_movement			(bool enabled)
+{
+//	m_path_actuality					= m_path_actuality && (m_enabled == enabled);
+	if (!enabled && m_enabled)
+		m_on_disable_object_position	= object().Position();
+	else {
+		if (enabled && !m_enabled && !object().Position().similar(m_on_disable_object_position))
+			m_path_actuality			= false;
+	}
+
+	m_enabled							= enabled;
+}
+
+CRestrictedObject *CMovementManager::create_restricted_object	()
+{
+	return								(new CRestrictedObject(m_object));
+}
+
+CMovementManager::CLevelPathManager::PATH &CMovementManager::level_path_path		()
+{
+	return								(level_path().m_path);
+}
+
+void CMovementManager::build_level_path	()
+{
+//	CTimer								timer;
+//	timer.Start							();
+	level_path_builder().process_impl	();
+//	static int i=0;
+//	Msg									("[%6d][%6d][%4d][%f] build_level_path",Device.dwTimeGlobal,Device.dwFrame,++i,timer.GetElapsed_sec()*1000.f);
+}
+
+Fvector CMovementManager::predict_position	(const float &time_delta, const Fvector &start_position, u32 &current_travel_point, const float &velocity) const
+{
+	typedef xr_vector<DetailPathManager::STravelPathPoint>	PATH;
+	const PATH				&path = detail().path();
+	if (path.empty())
+		return				(start_position);
+
+	float					distance_to_check = velocity*time_delta;
+
+	const u32				&path_size = (u32)path.size();
+	if (current_travel_point == path_size - 1)
+		return				(path.back().position);
+
+	{
+		const Fvector		&next = path[current_travel_point + 1].position;
+		float				distance = start_position.distance_to(next);
+		if (distance >= distance_to_check) {
+			if (next.similar(start_position))
+				return		(next);
+
+			Fvector			result;
+			result.sub		(next,start_position);
+			result.normalize();
+			result.mul		(distance_to_check);
+			result.add		(start_position);
+			return			(result);
+		}
+
+		distance_to_check	-= distance;
+		++current_travel_point;
+	}
+
+	while (current_travel_point < (path_size - 1)) {
+		const Fvector		&current = path[current_travel_point].position;
+		const Fvector		&next = path[current_travel_point + 1].position;
+		float				distance = current.distance_to(next);
+		if (distance > distance_to_check)
+			break;
+
+		distance_to_check	-= distance;
+		++current_travel_point;
+	}
+
+	if (current_travel_point == path_size - 1)
+		return				(path.back().position);
+
+	const Fvector			&current = path[current_travel_point].position;
+	const Fvector			&next = path[current_travel_point + 1].position;
+
+	VERIFY					(current.distance_to(next) > distance_to_check);
+
+	if (next.similar(current))
+		return				(next);
+
+	Fvector					direction = Fvector().sub(next,current);
+	direction.normalize		();
+	direction.mul			(distance_to_check);
+	direction.add			(current);
+	return					(direction);
+}
+
+Fvector CMovementManager::predict_position	(const float &time_delta) const
+{
+	u32						travel_point = detail().m_current_travel_point;
+	return					(predict_position(time_delta,object().Position(),travel_point,prediction_speed()));
+}
+
+const float &CMovementManager::prediction_speed		() const
+{
+	return					(old_desirable_speed());
+}
+
+Fvector CMovementManager::target_position			() const
+{
+	if (detail().path().empty())
+		return				(object().Position());
+
+	return					(detail().path()[detail().last_patrol_point()].position);
+}
+
+void CMovementManager::UpdatePathDebug()
+{
+	if (!g_ALDrawPaths || wait_for_distributed_computation())
+	{
+		return;
+	}
+
+	xrCriticalSectionGuard Guard(PathDrawMutex);
+	PathDrawData.Valid = false;
+	PathDrawData.Points.clear();
+	if (!base_level_params()->UsePathLimits || !ai().get_level_graph())
+	{
+		return;
+	}
+
+	const ILevelGraph& Graph = ai().level_graph();
+	const u32 TargetId = level_path().SearchDestVertexId;
+	if (!Graph.valid_vertex_id(TargetId))
+	{
+		return;
+	}
+
+	PathDrawData.Position = object().Position();
+	PathDrawData.Target = Graph.vertex_position(TargetId);
+	PathDrawData.ObjectId = object().ID();
+	PathDrawData.Partial = level_path().IsPartialPath();
+	PathDrawData.Failed = level_path().failed();
+	PathDrawData.Expensive = level_path().ExpensiveRoute;
+	for (const u32 VertexId : level_path().path())
+	{
+		if (!Graph.valid_vertex_id(VertexId))
+		{
+			return;
+		}
+		Fvector Point = Graph.vertex_position(VertexId);
+		PathDrawData.Points.push_back(Point);
+	}
+	PathDrawData.Valid = true;
+}
+
+void CMovementManager::DrawPathDebug(LevelInspector& Prims)
+{
+	if (!g_ALDrawPaths)
+	{
+		return;
+	}
+
+	xrCriticalSectionGuard Guard(PathDrawMutex);
+	const PathDrawSnapshot& Data = PathDrawData;
+	if (!Data.Valid)
+	{
+		return;
+	}
+
+	const u32 PathColor = (Data.Failed || Data.Expensive) ? color_rgba(255, 70, 70, 255) : color_rgba(40, 220, 255, 255);
+	const u32 TargetColor = color_rgba(255, 220, 40, 255);
+	const u32 SegmentColor = color_rgba(220, 70, 255, 255);
+	for (size_t Index = 1; Index < Data.Points.size(); ++Index)
+	{
+		Prims.append_line(Fvector(Data.Points[Index - 1]).add(Fvector().set(0.f, 0.25f, 0.f)), Fvector(Data.Points[Index]).add(Fvector().set(0.f, 0.25f, 0.f)), PathColor);
+	}
+
+	Fvector Target = Data.Target;
+	Target.y += 0.4f;
+	Prims.append_sphere(Target, 0.5f, TargetColor, color_rgba(255, 220, 40, 25));
+	Prims.append_text3d(Fvector(Target).add(Fvector().set(0.f, 0.9f, 0.f)), shared_str().printf("#%u", Data.ObjectId), TargetColor);
+
+	// A short direction arrow identifies the goal without drawing kilometer-long lines.
+	Fvector Direction;
+	Direction.sub(Data.Target, Data.Position);
+	if (Direction.square_magnitude() > EPS_L)
+	{
+		Direction.normalize();
+		Prims.append_lines_arrow(Fvector(Data.Position).add(Fvector().set(0.f, 1.f, 0.f)), Direction, 3.f, TargetColor);
+	}
+	if (Data.Partial && !Data.Points.empty())
+	{
+		Fvector End = Data.Points.back();
+		End.y += 0.4f;
+		Prims.append_sphere(End, 0.35f, SegmentColor, color_rgba(220, 70, 255, 25));
+		Prims.append_text3d(Fvector(End).add(Fvector().set(0.f, 0.8f, 0.f)), shared_str().printf("#%u", Data.ObjectId), SegmentColor);
+	}
+
+	Prims.append_text3d(Fvector(Data.Position).add(Fvector().set(0.f, 2.2f, 0.f)), shared_str().printf("#%u", Data.ObjectId), PathColor);
+}

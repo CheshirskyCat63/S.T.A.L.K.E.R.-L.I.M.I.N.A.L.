@@ -1,0 +1,93 @@
+#pragma once
+
+#include "../../xrUI/Widgets/UIDialogWnd.h"
+#include "../../xrUI/Widgets/UIStatic.h"
+#include "../../xrUI/Widgets/UIButton.h"
+#include "../../xrUI/Widgets/UIEditBox.h"
+#include "../../xrUI/Widgets/UIFrameWindow.h"
+
+
+#include "../PhraseDialogDefs.h"
+
+class CActor;
+class CInventoryOwner;
+class CPhraseDialogManager;
+class CUITalkDialogWnd;
+
+class CUITalkWnd final : public CUIDialogWnd
+{
+private:
+	typedef CUIDialogWnd inherited;
+	ref_sound			m_sound;
+	void				PlaySnd					(const char* text);
+	void				StopSnd					();
+
+public:
+						CUITalkWnd();
+	virtual				~CUITalkWnd();
+
+	IC		bool		playing_sound			()		 { return m_sound.is_playing(); }
+	IC	CInventoryOwner*OthersInvOwner			() const { return m_pOthersInvOwner;	 };
+
+			void		InitTalkWnd				();
+
+	virtual bool		StopAnyMove				(){return true;}
+	virtual void		SendMessage				(CUIWindow* pWnd, s16 msg, void* pData = NULL);
+
+	virtual void		Draw					();
+	virtual void		Update					();
+		
+	virtual void		Show					(bool status);
+	
+	void				Stop					();
+	void				StopTalk				();
+
+	void				UpdateQuestions			();
+	void				NeedUpdateQuestions		();
+	bool				IsActiveTalkUi			();
+	void				InitOthersStartDialog	();
+	virtual bool		OnKeyboardAction				(int dik, EUIMessages keyboard_action);
+	virtual bool		OnGamepadKeyAction		(int id, EUIMessages gamepad_action) override;
+	virtual bool		OnGamepadKeyHold		(int id) override;
+	void				SwitchToTrade			();
+	void				SwitchToUpgrade			();
+	void				AddIconedMessage		(const char* caption, const char* text, const char* texture_name, const char* templ_name);
+    void				AddIconedMessage		(const char* text, const char* texture_name, Frect texture_rect, const char* templ_name);
+
+	virtual CUIWindow* ui_cast_window() { return this; }
+
+protected:
+	void				InitTalkDialog			();
+	void				AskQuestion				();
+
+	void				SayPhrase				(const shared_str& phrase_id);
+
+public:
+	void				AddQuestion				(const shared_str& text, const shared_str& id, int number, SPhraseInfo phInfo);
+	void				AddAnswer				(const shared_str& text, const char* SpeakerName);
+	bool				b_disable_break;
+	CUITalkDialogWnd*	UITalkDialogWnd;
+protected:
+
+	CActor*				m_pActor;
+	CInventoryOwner*	m_pOurInvOwner;
+	CInventoryOwner*	m_pOthersInvOwner;
+	
+	CPhraseDialogManager* m_pOurDialogManager;
+	CPhraseDialogManager* m_pOthersDialogManager;
+
+	bool				m_bNeedToUpdateQuestions;
+
+	DIALOG_SHARED_PTR	m_pCurrentDialog;
+	bool				TopicMode				();
+	void				ToTopicMode				();
+
+private:
+	void UpdateTalkDof();
+	void RestoreTalkEffects();
+	float SavedFov = 0.0f;
+	bool HasTalkFov = false;
+	bool HasTalkDof = false;
+	Fvector4 m_TalkDof = {};
+	float m_talkFovScale;
+};

@@ -1,0 +1,1185 @@
+#include "stdafx.h"
+
+static const u32 DETMGR_VERSION = 0x0003ul;
+
+static const char B64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static xr_string Base64Encode(const u8* In, size_t Len)
+{
+	xr_string Out;
+	Out.reserve(((Len + 2) / 3) * 4);
+	for (size_t Index = 0; Index < Len; Index += 3)
+	{
+		u32 OctetA = In[Index];
+		u32 OctetB = (Index + 1 < Len) ? In[Index + 1] : 0;
+		u32 OctetC = (Index + 2 < Len) ? In[Index + 2] : 0;
+		u32 Triple = (OctetA << 16) | (OctetB << 8) | OctetC;
+		Out += B64Alphabet[(Triple >> 18) & 0x3F];
+		Out += B64Alphabet[(Triple >> 12) & 0x3F];
+		Out += (Index + 1 < Len) ? B64Alphabet[(Triple >> 6) & 0x3F] : '=';
+		Out += (Index + 2 < Len) ? B64Alphabet[Triple & 0x3F] : '=';
+	}
+	return Out;
+}
+static int B64Val(char Ch)
+{
+	if (Ch >= 'A' && Ch <= 'Z') return Ch - 'A';
+	if (Ch >= 'a' && Ch <= 'z') return Ch - 'a' + 26;
+	if (Ch >= '0' && Ch <= '9') return Ch - '0' + 52;
+	if (Ch == '+') return 62;
+	if (Ch == '/') return 63;
+	return -1;
+}
+static xr_vector<u8> Base64Decode(const char* In, size_t Len)
+{
+	xr_vector<u8> Out;
+	Out.reserve((Len / 4) * 3);
+	for (size_t Index = 0; Index + 3 < Len + 1; Index += 4)
+	{
+		int Values[4];
+		for (int K = 0; K < 4; ++K)
+		{
+			Values[K] = (Index + K < Len) ? B64Val(In[Index + K]) : 0;
+			if (Values[K] < 0) Values[K] = 0;
+		}
+		u32 Triple = (Values[0] << 18) | (Values[1] << 12) | (Values[2] << 6) | Values[3];
+		Out.push_back((Triple >> 16) & 0xFF);
+		if (Index + 2 < Len && In[Index + 2] != '=')
+			Out.push_back((Triple >> 8) & 0xFF);
+		if (Index + 3 < Len && In[Index + 3] != '=')
+			Out.push_back(Triple & 0xFF);
+	}
+	return Out;
+}
+
+enum{
+    DETMGR_CHUNK_VERSION		= 0x1000ul,
+    DETMGR_CHUNK_HEADER 		= 0x0000ul,
+    DETMGR_CHUNK_OBJECTS 		= 0x0001ul,
+    DETMGR_CHUNK_SLOTS			= 0x0002ul,
+    DETMGR_CHUNK_BBOX			= 0x1001ul,
+    DETMGR_CHUNK_BASE_TEXTURE	= 0x1002ul,
+    DETMGR_CHUNK_COLOR_INDEX 	= 0x1003ul,
+    DETMGR_CHUNK_SNAP_OBJECTS 	= 0x1004ul,
+    DETMGR_CHUNK_DENSITY	 	= 0x1005ul,
+    DETMGR_CHUNK_FLAGS			= 0x1006ul,
+    DETMGR_CHUNK_BASE_TEXTURE_DATA= 0x1007ul,
+};
+
+
+EDetailManager::EDetailManager():ESceneToolBase(OBJCLASS_DO)
+{
+	dtSlots				= 0;
+    ZeroMemory			(&dtH,sizeof(dtH));
+    m_Selected.clear	();
+    InitRender			();
+//.	EDevice->seqDevCreate.Add	(this,REG_PRIORITY_LOW);
+//.	EDevice->seqDevDestroy.Add(this,REG_PRIORITY_NORMAL);
+    m_Flags.assign		(flObjectsDraw);
+
+	PaintColor.set	(1.f, 1.f, 1.f, 1.f);
+	BrushSize			= 10;
+	BrushStrength		= 0.5f;
+	PaintErase		= false;
+	BrushActive		= false;
+	BaseDataDirty		= false;
+}
+
+EDetailManager::~EDetailManager(){
+//.	EDevice->seqDevCreate.Remove(this);
+//.	EDevice->seqDevDestroy.Remove(this);
+	Clear	();
+    Unload	();
+}
+
+void EDetailManager::ClearColorIndices()
+{
+	inherited::Clear	();
+    RemoveDOs			();
+    m_ColorIndices.clear();
+}
+void EDetailManager::ClearSlots()
+{
+    ZeroMemory			(&dtH,sizeof(DetailHeader));
+    xr_free				(dtSlots);
+	m_Selected.clear	();
+    InvalidateCache		();
+}
+void EDetailManager::ClearBase()
+{
+    m_Base.Clear		();
+    m_SnapObjects.clear	();
+}
+void EDetailManager::Clear(bool bSpecific)
+{
+	ClearBase			();
+	ClearColorIndices	();
+    ClearSlots			();
+    m_Flags.zero		();
+    m_RTFlags.zero		();
+}
+
+void EDetailManager::InvalidateCache()
+{
+	// detail cache is rebuilt in a parallel render task (Device.DetailsTask);
+	// wait for it to finish before touching cache structures / dtSlots
+    Device.DetailsTask.wait();
+	// Initialize 'vis' and 'cache'
+    cache_ReInitialize();
+}
+
+void EDetailManager::InitRender()
+{
+	// inavlidate cache
+	InvalidateCache		();
+	// Make dither matrix
+	bwdithermap		(2,dither);
+
+    //hw_Load();
+}
+
+bool EDetailManager::IsObjectsDrawn()
+{
+	return IsLoaded && dtSlots != nullptr && !objects.empty() && m_Flags.is(flObjectsDraw) && IsVisible();
+}
+
+void EDetailManager::OnRender(int priority, bool strictB2F)
+{
+	if (!IsLoaded)
+	{
+		return;
+	}
+
+	if (dtSlots)
+	{
+		if (1 == priority)
+		{
+			if (!strictB2F)
+			{
+				if (m_Flags.is(flSlotBoxesDraw))
+				{
+					RCache.set_xform_world(Fidentity);
+					EDevice->SetShader(GEditorDraw.WireShader);
+
+					Fvector c;
+					Fbox bbox;
+					u32 inactive = 0xff808080;
+					u32 selected = 0xffffffff;
+					float dist_lim = 75.f * 75.f;
+					for (u32 z = 0; z < dtH.size_z; z++)
+					{
+						c.z = fromSlotZ(z);
+						for (u32 x = 0; x < dtH.size_x; x++)
+						{
+							bool bSel = m_Selected[z * dtH.size_x + x];
+							DetailSlot* slot = dtSlots + z * dtH.size_x + x;
+							c.x = fromSlotX(x);
+							c.y = slot->r_ybase() + slot->r_yheight() * 0.5f;
+							float dist = EContext.UI->CurrentView().m_Camera.GetPosition().distance_to_sqr(c);
+							if ((dist < dist_lim) && ::Render->ViewBase.testSphere_dirty(c, DETAIL_SLOT_SIZE_2))
+							{
+								bbox.min.set(c.x - DETAIL_SLOT_SIZE_2, slot->r_ybase(), c.z - DETAIL_SLOT_SIZE_2);
+								bbox.max.set(c.x + DETAIL_SLOT_SIZE_2, slot->r_ybase() + slot->r_yheight(), c.z + DETAIL_SLOT_SIZE_2);
+								bbox.shrink(0.05f);
+								DU_impl.DrawSelectionBoxB(bbox, bSel ? &selected : &inactive);
+							}
+						}
+					}
+				}
+
+				if (GetSubTarget(0) == estDOPaint && BrushActive)
+				{
+					RenderBrush();
+				}
+			}
+			else
+			{
+				RCache.set_xform_world(Fidentity);
+				if (m_Flags.is(flBaseTextureDraw))
+				{
+					m_Base.Render(m_Flags.is(flBaseTextureBlended));
+				}
+				// The objects are drawn by the renderer pipeline (IsObjectsDrawn)
+			}
+		}
+	}
+}
+
+void EDetailManager::OnDeviceCreate()
+{
+    // base texture
+    m_Base.CreateShader();
+    // detail objects
+    for (DetailIt it = objects.begin(); it != objects.end(); it++)
+        ((EDetail*)(*it))->OnDeviceCreate();
+
+    if (!objects.empty())
+        hw_Load();
+}
+
+void EDetailManager::OnDeviceDestroy()
+{
+	// base texture
+    m_Base.DestroyShader();
+	// detail objects
+	for (DetailIt it=objects.begin(); it!=objects.end(); it++)
+    	((EDetail*)(*it))->OnDeviceDestroy();
+	hw_Unload	();
+}
+
+
+void EDetailManager::OnObjectRemove(CCustomObject* O, bool bDeleting)
+{
+	ObjectIt it=std::find(m_SnapObjects.begin(),m_SnapObjects.end(),O);
+	if (it!=m_SnapObjects.end()){
+    	m_RTFlags.set		(flRTGenerateBaseMesh,true);
+		m_SnapObjects.remove(O);
+    }
+}
+void EDetailManager::OnSynchronize()
+{
+}
+void EDetailManager::OnSceneUpdate()       
+{
+}
+
+void EDetailManager::OnFrame()
+{
+    if (m_RTFlags.is(flRTGenerateBaseMesh)&&m_Base.Valid()){
+    	m_RTFlags.set		(flRTGenerateBaseMesh,false);
+	    m_Base.CreateRMFromObjects(m_BBox,m_SnapObjects);
+    }
+}
+
+void EDetailManager::ExportColorIndices(const char* fname)
+{
+	IWriter* F 	= FS.w_open(fname);
+    if (F){
+	    SaveColorIndices(*F);
+    	FS.w_close	(F);
+    }
+}
+
+bool EDetailManager::ImportColorIndices(const char* fname)
+{
+    FS.TryLoad(fname);
+	IReader* F=FS.r_open(fname);
+    if (F){
+        ClearColorIndices	();
+        LoadColorIndices	(*F);
+        FS.r_close			(F);
+        return true;
+    }else{
+    	ELog.DlgMsg			(mtError,"Can't open file '%s'.",fname);
+        return false;
+    }
+}
+
+void EDetailManager::SaveColorIndices(IWriter& F)
+{
+	// objects
+	F.open_chunk		(DETMGR_CHUNK_OBJECTS);
+    for (DetailIt it=objects.begin(); it!=objects.end(); it++){
+		F.open_chunk	(it-objects.begin());
+        ((EDetail*)(*it))->Save		(F);
+	    F.close_chunk	();
+    }
+    F.close_chunk		();
+    // color index map
+	F.open_chunk		(DETMGR_CHUNK_COLOR_INDEX);
+    F.w_u8				((u8)m_ColorIndices.size());
+    ColorIndexPairIt S 	= m_ColorIndices.begin();
+    ColorIndexPairIt E 	= m_ColorIndices.end();
+    ColorIndexPairIt i_it= S;
+	for(; i_it!=E; i_it++){
+		F.w_u32		(i_it->first);
+        F.w_u8			((u8)i_it->second.size());
+	    for (DOIt d_it=i_it->second.begin(); d_it!=i_it->second.end(); d_it++)
+        	F.w_stringZ	((*d_it)->GetName());
+    }
+    F.close_chunk		();
+}
+
+bool EDetailManager::LoadColorIndices(IReader& F)
+{
+    VERIFY(objects.empty());
+    VERIFY(m_ColorIndices.empty());
+
+    bool bRes = true;
+    // objects
+    IReader* OBJ = F.open_chunk(DETMGR_CHUNK_OBJECTS);
+    if (OBJ) {
+        IReader* O = OBJ->open_chunk(0);
+        for (int count = 1; O; count++)
+        {
+            EDetail* DO = new EDetail();
+            if (DO->Load(*O)) 	objects.push_back(DO);
+            else				bRes = false;
+            O->close();
+            O = OBJ->open_chunk(count);
+        }
+        OBJ->close();
+    }
+    // color index map
+    R_ASSERT(F.find_chunk(DETMGR_CHUNK_COLOR_INDEX));
+    int cnt = F.r_u8();
+    string256 buf;
+    u32 index;
+    int ref_cnt;
+
+    for (int k = 0; k < cnt; k++) 
+    {
+        index = F.r_u32();
+        ref_cnt = F.r_u8();
+        for (int j = 0; j < ref_cnt; j++) 
+        {
+            F.r_stringZ(buf, sizeof(buf));
+            EDetail* DO = FindDOByName(buf);
+            if (DO) 	m_ColorIndices[index].push_back(DO);
+            else		bRes = false;
+        }
+    }
+    InvalidateCache();
+
+    if (!objects.empty())
+        hw_Load();
+
+    return bRes;
+}
+
+bool EDetailManager::LoadLTX(CInifile& ini)
+{
+    IsLoaded = false;
+
+    inherited::LoadLTX(ini);
+
+    // version
+    u32 version = ini.r_u32("main", "version");
+
+    if (version != DETMGR_VERSION) {
+        ELog.Msg(mtError, "EDetailManager: unsupported version.");
+        return false;
+    }
+
+    // flags
+    m_Flags.assign(ini.r_u32("main", "flags"));
+
+    // header
+    dtH.version = ini.r_u32("detail_header", "version");
+    dtH.object_count = ini.r_u32("detail_header", "object_count");
+    dtH.offs_x = ini.r_s64("detail_header", "offset_x");
+    dtH.offs_z = ini.r_s64("detail_header", "offset_z");
+    dtH.size_x = ini.r_u32("detail_header", "size_x");
+    dtH.size_z = ini.r_u32("detail_header", "size_z");
+
+    // slots
+    u32 cnt_detail_slots = ini.r_u32("main", "detail_slots_count");
+    if (cnt_detail_slots)dtSlots = xr_alloc<DetailSlot>(cnt_detail_slots);
+    m_Selected.resize(cnt_detail_slots);
+
+    if (cnt_detail_slots)
+    {
+        for (u32 i = 0; i < cnt_detail_slots; i++)
+        {
+            string128 sect_name;
+            sprintf(sect_name, "detail_slot_%d", i);
+            dtSlots[i].y_base = ini.r_u32(sect_name, "y_base");
+            dtSlots[i].y_height = ini.r_u32(sect_name, "y_height");
+            dtSlots[i].id0 = ini.r_u32(sect_name, "id0");
+            dtSlots[i].id1 = ini.r_u32(sect_name, "id1");
+            dtSlots[i].id2 = ini.r_u32(sect_name, "id2");
+            dtSlots[i].id3 = ini.r_u32(sect_name, "id3");
+            dtSlots[i].c_dir = ini.r_u32(sect_name, "c_dir");
+            dtSlots[i].c_hemi = ini.r_u32(sect_name, "c_hemi");
+            dtSlots[i].c_r = ini.r_u32(sect_name, "c_r");
+            dtSlots[i].c_g = ini.r_u32(sect_name, "c_g");
+            dtSlots[i].c_b = ini.r_u32(sect_name, "c_b");
+
+            Ivector4 v;
+            v.set(ini.r_ivector4(sect_name, "palette_0"));
+            dtSlots[i].palette[0].a0 = v.x;
+            dtSlots[i].palette[0].a1 = v.y;
+            dtSlots[i].palette[0].a2 = v.z;
+            dtSlots[i].palette[0].a3 = v.w;
+
+            v.set(ini.r_ivector4(sect_name, "palette_1"));
+            dtSlots[i].palette[1].a0 = v.x;
+            dtSlots[i].palette[1].a1 = v.y;
+            dtSlots[i].palette[1].a2 = v.z;
+            dtSlots[i].palette[1].a3 = v.w;
+
+            v.set(ini.r_ivector4(sect_name, "palette_2"));
+            dtSlots[i].palette[2].a0 = v.x;
+            dtSlots[i].palette[2].a1 = v.y;
+            dtSlots[i].palette[2].a2 = v.z;
+            dtSlots[i].palette[2].a3 = v.w;
+
+            v.set(ini.r_ivector4(sect_name, "palette_3"));
+            dtSlots[i].palette[3].a0 = v.x;
+            dtSlots[i].palette[3].a1 = v.y;
+            dtSlots[i].palette[3].a2 = v.z;
+            dtSlots[i].palette[3].a3 = v.w;
+        }
+    }
+
+    // objects
+
+    VERIFY(objects.empty());
+    VERIFY(m_ColorIndices.empty());
+
+    bool bRes = true;
+
+    u32 cnt_detail_objects = ini.r_u32("main", "detail_objects_count");
+
+    for (u32 i = 0; i < cnt_detail_objects; i++)
+    {
+        EDetail* DO = new EDetail();
+        string128 sect_name;
+        sprintf(sect_name, "detail_object_%d", i);
+        if (DO->LoadLTX(ini, sect_name)) objects.push_back(DO);
+        else bRes = false;
+    }
+
+    // color index map
+    u32 cnt_color_indices = ini.r_u32("main", "color_indices_count");
+    for (u32 i = 0; i < cnt_color_indices; i++)
+    {
+        string128 sect_name;
+        sprintf(sect_name, "color_index_%d", i);
+        u32 index = ini.r_u32(sect_name, "index");
+        u32 ref_cnt = ini.r_u32(sect_name, "reference_count");
+        for (u32 j = 0; j < ref_cnt; j++)
+        {
+            string128 key;
+            sprintf(key, "reference_%d", j);
+            EDetail* DO = FindDOByName(ini.r_string(sect_name, key));
+            if (DO) m_ColorIndices[index].push_back(DO);
+            else bRes = false;
+        }
+    }
+
+    InvalidateCache();
+
+    if (!objects.empty())
+        hw_Load();
+
+    if (!bRes)
+    {
+        ELog.DlgMsg(mtError, "EDetailManager: Some objects removed. Reinitialize objects.");
+        InvalidateSlots();
+    }
+
+    // internal
+    // bbox
+    m_BBox.min = ini.r_fvector3("main", "bbox_min");
+    m_BBox.max = ini.r_fvector3("main", "bbox_max");
+
+    // snap objects
+    u32 cnt_snap_objects = ini.r_u32("main", "snap_objects_count");
+
+    for (u32 i = 0; i < cnt_snap_objects; i++)
+    {
+        string128 sect_name;
+        sprintf(sect_name, "snap_object_%d", i);
+        const char* s = ini.r_string(sect_name, "name");
+        CCustomObject* O = Scene->FindObjectByName(s, OBJCLASS_SCENEOBJECT);
+        if (!O) ELog.Msg(mtError, "EDetailManager: Can't find snap object '%s'.", s);
+        else m_SnapObjects.push_back(O);
+    }
+
+    // detail density
+    ps_r__Detail_density = ini.r_float("main", "detail_density");
+
+    // base texture
+    const char* s = ini.r_string("main", "base_texture");
+    if (s)
+    {
+        string256 image_name;
+        sprintf(image_name, "%s", s);
+
+        if (m_Base.LoadImage(image_name))
+        {
+            m_Base.CreateShader();
+            m_RTFlags.set(flRTGenerateBaseMesh, true);
+        }
+        else
+        {
+            ELog.Msg(mtError, "EDetailManager: Can't find base texture '%s'.", image_name);
+            ClearSlots();
+            ClearBase();
+        }
+    }
+        else
+        {
+            ELog.Msg(mtError, "EDetailManager: Can't find base texture.");
+            ClearSlots();
+            ClearBase();
+        }
+
+    // painted base texture data (grass mask)
+    if (ini.line_exist("main", "base_paint_data"))
+    {
+        u32 Width = ini.r_u32("main", "base_paint_w");
+        u32 Height = ini.r_u32("main", "base_paint_h");
+        const char* Encoded = ini.r_string("main", "base_paint_data");
+        xr_vector<u8> Bytes = Base64Decode(Encoded, xr_strlen(Encoded));
+        u32 Count = Width * Height;
+        if (Bytes.size() == Count * 4)
+        {
+            m_Base.w = Width;
+            m_Base.h = Height;
+            m_Base.data.resize(Count);
+            CopyMemory(m_Base.data.data(), Bytes.data(), Count * 4);
+            BaseDataDirty = true;
+        }
+    }
+
+    InvalidateCache();
+
+    IsLoaded = true;
+
+    return true;
+}
+
+void EDetailManager::SaveLTX(CInifile& ini, int id)
+{
+    inherited::SaveLTX(ini, id);
+
+    // version
+    ini.w_u32("main", "version", DETMGR_VERSION);
+
+    // flags
+    ini.w_u32("main", "flags", m_Flags.get());
+
+    // header
+    ini.w_u32("detail_header", "version", dtH.version);
+    ini.w_u32("detail_header", "object_count", dtH.object_count);
+    ini.w_s64("detail_header", "offset_x", dtH.offs_x);
+    ini.w_s64("detail_header", "offset_z", dtH.offs_z);
+    ini.w_u32("detail_header", "size_x", dtH.size_x);
+    ini.w_u32("detail_header", "size_z", dtH.size_z);
+
+    // objects
+    u32 cnt_detail_objects = objects.size();
+    ini.w_u32("main", "detail_objects_count", cnt_detail_objects);
+    if (cnt_detail_objects)
+    {
+        u32 i = 0;
+        for (DetailIt it = objects.begin(); it != objects.end(); it++, i++)
+        {
+            string128 sect_name;
+            sprintf(sect_name, "detail_object_%d", i);
+            ((EDetail*)(*it))->SaveLTX(ini, sect_name);
+        }
+    }
+
+    // color index map
+    u32 cnt_color_indices = m_ColorIndices.size();
+    ini.w_u32("main", "color_indices_count", cnt_color_indices);
+    if (cnt_color_indices)
+    {
+        u32 i = 0;
+        for (ColorIndexPairIt i_it = m_ColorIndices.begin(); i_it != m_ColorIndices.end(); i_it++, i++)
+        {
+            string128 sect_name;
+            sprintf(sect_name, "color_index_%d", i);
+            ini.w_u32(sect_name, "index", i_it->first);
+            ini.w_u32(sect_name, "reference_count", static_cast<u8>(i_it->second.size()));
+
+            u32 j = 0;
+            for (const auto& item : i_it->second)
+            {
+                string128 key;
+                sprintf(key, "reference_%d", j);
+                ini.w_string(sect_name, key, item->GetName());
+                j++;
+            }
+        }
+    }
+
+    // slots
+    u32 cnt_detail_slots = dtH.size_x * dtH.size_z;
+    ini.w_u32("main", "detail_slots_count", cnt_detail_slots);
+    if (cnt_detail_slots)
+    {
+        for (u32 i = 0; i < cnt_detail_slots; i++)
+        {
+            string128 sect_name;
+            sprintf(sect_name, "detail_slot_%d", i);
+            ini.w_u32(sect_name, "y_base", dtSlots[i].y_base);
+            ini.w_u32(sect_name, "y_height", dtSlots[i].y_height);
+            ini.w_u32(sect_name, "id0", dtSlots[i].id0);
+            ini.w_u32(sect_name, "id1", dtSlots[i].id1);
+            ini.w_u32(sect_name, "id2", dtSlots[i].id2);
+            ini.w_u32(sect_name, "id3", dtSlots[i].id3);
+            ini.w_u32(sect_name, "c_dir", dtSlots[i].c_dir);
+            ini.w_u32(sect_name, "c_hemi", dtSlots[i].c_hemi);
+            ini.w_u32(sect_name, "c_r", dtSlots[i].c_r);
+            ini.w_u32(sect_name, "c_g", dtSlots[i].c_g);
+            ini.w_u32(sect_name, "c_b", dtSlots[i].c_b);
+
+            ini.w_ivector4(sect_name, "palette_0", Ivector4().set(dtSlots[i].palette[0].a0, dtSlots[i].palette[0].a1, dtSlots[i].palette[0].a2, dtSlots[i].palette[0].a3));
+            ini.w_ivector4(sect_name, "palette_1", Ivector4().set(dtSlots[i].palette[1].a0, dtSlots[i].palette[1].a1, dtSlots[i].palette[1].a2, dtSlots[i].palette[1].a3));
+            ini.w_ivector4(sect_name, "palette_2", Ivector4().set(dtSlots[i].palette[2].a0, dtSlots[i].palette[2].a1, dtSlots[i].palette[2].a2, dtSlots[i].palette[2].a3));
+            ini.w_ivector4(sect_name, "palette_3", Ivector4().set(dtSlots[i].palette[3].a0, dtSlots[i].palette[3].a1, dtSlots[i].palette[3].a2, dtSlots[i].palette[3].a3));
+        }
+    }
+
+    // internal
+    // bbox
+    ini.w_fvector3("main", "bbox_min", m_BBox.min);
+    ini.w_fvector3("main", "bbox_max", m_BBox.max);
+
+    // base texture
+    ini.w_string("main", "base_texture", m_Base.Valid() ? m_Base.GetName() : NULL);
+
+    // painted base texture data (grass mask)
+    if (m_Base.Valid() && BaseDataDirty){
+		u32 Count = m_Base.w * m_Base.h;
+		xr_vector<u8> Bytes(Count * 4);
+		CopyMemory(Bytes.data(), m_Base.data.data(), Count * 4);
+		xr_string Encoded = Base64Encode(Bytes.data(), Bytes.size());
+		ini.w_u32("main", "base_paint_w", m_Base.w);
+		ini.w_u32("main", "base_paint_h", m_Base.h);
+		ini.w_string("main", "base_paint_data", Encoded.c_str());
+    }
+
+    // detail density
+    ini.w_float("main", "detail_density", ps_r__Detail_density);
+
+    u32 cnt_snap_objects = m_SnapObjects.size();
+    ini.w_u32("main", "snap_objects_count", cnt_snap_objects);
+
+    if (cnt_snap_objects)
+    {
+        u32 i = 0;
+        for (ObjectIt o_it = m_SnapObjects.begin(); o_it != m_SnapObjects.end(); o_it++, i++)
+        {
+            string128 sect_name;
+            sprintf(sect_name, "snap_object_%d", i);
+            ini.w_string(sect_name, "name", (*o_it)->GetName());
+        }
+    }
+}
+
+bool EDetailManager::LoadStream(IReader& F)
+{
+    IsLoaded = false;
+	inherited::LoadStream	(F);
+
+    string256 buf;
+    R_ASSERT			(F.find_chunk(DETMGR_CHUNK_VERSION));
+	u32 version			= F.r_u32();
+
+    if (version!=DETMGR_VERSION){
+    	ELog.Msg(mtError,"EDetailManager: unsupported version.");
+        return false;
+    }
+
+    if (F.find_chunk(DETMGR_CHUNK_FLAGS)) m_Flags.assign(F.r_u32());
+    
+	// header
+    R_ASSERT			(F.r_chunk(DETMGR_CHUNK_HEADER,&dtH));
+
+    // slots
+    R_ASSERT			(F.find_chunk(DETMGR_CHUNK_SLOTS));
+    int slot_cnt		= F.r_u32();
+	if (slot_cnt)dtSlots= xr_alloc<DetailSlot>(slot_cnt);
+    m_Selected.resize	(slot_cnt);
+	F.r					(dtSlots,slot_cnt*sizeof(DetailSlot));
+
+    // objects
+    if (!LoadColorIndices(F)){
+        ELog.DlgMsg		(mtError,"EDetailManager: Some objects removed. Reinitialize objects.",buf);
+        InvalidateSlots	();
+    }
+
+    // internal
+    // bbox
+    R_ASSERT			(F.r_chunk(DETMGR_CHUNK_BBOX,&m_BBox));
+
+	// snap objects
+    if (F.find_chunk(DETMGR_CHUNK_SNAP_OBJECTS)){
+		int snap_cnt 		= F.r_u32();
+        if (snap_cnt){
+	        for (int i=0; i<snap_cnt; i++){
+    	    	F.r_stringZ	(buf,sizeof(buf));
+        	    CCustomObject* O = Scene->FindObjectByName(buf,OBJCLASS_SCENEOBJECT);
+            	if (!O)		ELog.Msg(mtError,"EDetailManager: Can't find snap object '%s'.",buf);
+	            else		m_SnapObjects.push_back(O);
+    	    }
+        }
+    }
+
+    if (F.find_chunk(DETMGR_CHUNK_DENSITY))
+		ps_r__Detail_density= F.r_float();
+
+	// base texture
+	if(F.find_chunk(DETMGR_CHUNK_BASE_TEXTURE)){
+	    F.r_stringZ		(buf,sizeof(buf));
+    	if (m_Base.LoadImage(buf)){
+		    m_Base.CreateShader();
+            m_RTFlags.set(flRTGenerateBaseMesh,true);
+        }else{
+        	ELog.Msg(mtError,"EDetailManager: Can't find base texture '%s'.",buf);
+            ClearSlots();
+            ClearBase();
+        }
+    }
+
+	// painted base texture data (grass mask)
+	if (F.find_chunk(DETMGR_CHUNK_BASE_TEXTURE_DATA)){
+		u32 Width = F.r_u32();
+		u32 Height = F.r_u32();
+		u32 Count = F.r_u32();
+		m_Base.w = Width;
+		m_Base.h = Height;
+		m_Base.data.resize(Count);
+		F.r				(m_Base.data.data(), (intptr_t)(Count * sizeof(u32)));
+		BaseDataDirty = true;
+	}
+
+    InvalidateCache		();
+
+    IsLoaded = true;
+
+    return true;
+}
+
+bool EDetailManager::LoadSelection(IReader& F)
+{
+	Clear();
+	return LoadStream			(F);
+}
+
+void EDetailManager::SaveStream(IWriter& F)
+{
+	inherited::SaveStream	(F);
+
+	// version
+	F.open_chunk		(DETMGR_CHUNK_VERSION);
+    F.w_u32				(DETMGR_VERSION);
+    F.close_chunk		();
+
+	F.open_chunk		(DETMGR_CHUNK_FLAGS);
+    F.w_u32				(m_Flags.get());
+	F.close_chunk		();
+
+	// header
+	F.w_chunk			(DETMGR_CHUNK_HEADER,&dtH,sizeof(DetailHeader));
+
+    // objects
+    SaveColorIndices	(F);
+
+    // slots
+	F.open_chunk		(DETMGR_CHUNK_SLOTS);
+    F.w_u32				(dtH.size_x*dtH.size_z);
+	F.w					(dtSlots,dtH.size_x*dtH.size_z*sizeof(DetailSlot));
+    F.close_chunk		();
+    // internal
+    // bbox
+	F.w_chunk			(DETMGR_CHUNK_BBOX,&m_BBox,sizeof(Fbox));
+    // base texture
+    if (m_Base.Valid()){
+		F.open_chunk	(DETMGR_CHUNK_BASE_TEXTURE);
+    	F.w_stringZ		(m_Base.GetName());
+	    F.close_chunk	();
+    }
+    // painted base texture data (grass mask)
+    if (m_Base.Valid() && BaseDataDirty){
+		F.open_chunk	(DETMGR_CHUNK_BASE_TEXTURE_DATA);
+		F.w_u32		(m_Base.w);
+		F.w_u32		(m_Base.h);
+		u32 Count	= m_Base.w * m_Base.h;
+		F.w_u32		(Count);
+		F.w			(m_Base.data.data(), (u32)(Count * sizeof(u32)));
+		F.close_chunk();
+    }
+    F.open_chunk		(DETMGR_CHUNK_DENSITY);
+    F.w_float			(ps_r__Detail_density);
+    F.close_chunk		();
+	// snap objects
+	F.open_chunk		(DETMGR_CHUNK_SNAP_OBJECTS);
+    F.w_u32				(m_SnapObjects.size());
+    for (ObjectIt o_it=m_SnapObjects.begin(); o_it!=m_SnapObjects.end(); o_it++)
+    	F.w_stringZ		((*o_it)->GetName());
+    F.close_chunk		();
+}
+
+void EDetailManager::SaveSelection(IWriter& F)
+{
+	SaveStream(F);
+}
+
+bool EDetailManager::Export(const char* path) 
+{
+    xr_string fn		= xr_string(path)+"build.details";
+    bool bRes=true;
+
+    SPBItem* pb = EContext.UI->ProgressStart(5, "Making details...");
+	CMemoryWriter F;
+
+    pb->Inc				("merge textures");
+    Fvector2Vec			offsets;
+    Fvector2Vec			scales;
+    boolVec				rotated;
+    RStringSet 			textures_set;
+    RStringVec 			textures;
+    U32Vec				remap;
+    U8Vec remap_object	(objects.size(),u8(-1));
+
+    int slot_cnt		= dtH.size_x*dtH.size_z;
+	for (int slot_idx=0; slot_idx<slot_cnt; slot_idx++){
+    	DetailSlot* it 	= &dtSlots[slot_idx];
+        for (int part=0; part<4; part++){
+        	u8 id		= it->r_id(part);
+        	if (id!=DetailSlot::ID_Empty) {
+            	textures_set.insert(((EDetail*)(objects[id]))->GetTextureName());
+                remap_object[id] = 1;
+            }
+        }
+    }
+    textures.assign		(textures_set.begin(),textures_set.end());
+
+    U8It remap_object_it= remap_object.begin();
+
+    u32 new_idx			= 0;
+    for (DetailIt d_it=objects.begin(); d_it!=objects.end(); d_it++,remap_object_it++)
+    	if ((*remap_object_it==1)&&(textures_set.find(((EDetail*)(*d_it))->GetTextureName())!=textures_set.end()))
+	    	*remap_object_it	= (u8)new_idx++;
+
+    xr_string 			do_tex_name = ChangeFileExt(fn,"_details");
+    int res = ImageLib.CreateMergedTexture(textures, do_tex_name.c_str(), STextureParams::tfDXT5, 256, 8192, 256, 8192, offsets, scales, rotated, remap);
+    if (1!=res)			bRes=false;
+
+    pb->Inc				("export geometry");
+    // objects
+    int object_idx		= 0;
+    if (bRes){
+	    do_tex_name 	= EFS.ExtractFileName(do_tex_name.c_str());
+        F.open_chunk	(DETMGR_CHUNK_OBJECTS);
+        for (DetailIt it=objects.begin(); it!=objects.end(); it++){
+        	if (remap_object[it-objects.begin()]!=u8(-1)){
+                F.open_chunk	(object_idx++);
+                if (!((EDetail*)(*it))->m_pRefs){
+                    ELog.DlgMsg(mtError, "Bad object or object not found '%s'.", ((EDetail*)(*it))->m_sRefs.c_str());
+                    bRes=false;
+                }else{
+                    const char* tex_name = ((EDetail*)(*it))->GetTextureName();
+                    u32 t_idx = 0;
+                    for (; t_idx<textures.size(); t_idx++) 
+                        if (textures[t_idx]==tex_name) break;
+                    VERIFY(t_idx<textures.size());
+                    t_idx = remap[t_idx];
+                    ((EDetail*)(*it))->Export	(F,do_tex_name.c_str(),offsets[t_idx],scales[t_idx],rotated[t_idx]);
+                }
+                F.close_chunk	();
+                if (!bRes) break;
+            }
+        }
+        F.close_chunk		();
+    }
+    
+    pb->Inc	("export slots");
+    // slots
+    if (bRes){
+    	xr_vector<DetailSlot> dt_slots(slot_cnt); dt_slots.assign(dtSlots,dtSlots+slot_cnt);
+        for (int slot_idx=0; slot_idx<slot_cnt; slot_idx++){
+            DetailSlot& it 	= dt_slots[slot_idx];
+            // zero colors need lighting
+	        it.c_dir		= 0;
+	        it.c_hemi		= 0;
+	        it.c_r			= 0;
+	        it.c_g			= 0;
+	        it.c_b			= 0;
+            for (int part=0; part<4; part++){
+                u8 id		= it.r_id(part);
+                if (id!=DetailSlot::ID_Empty) it.w_id(part,remap_object[id]);
+            }
+        }
+		F.open_chunk	(DETMGR_CHUNK_SLOTS);
+		F.w				(dt_slots.data(),dtH.size_x*dtH.size_z*sizeof(DetailSlot));
+	    F.close_chunk	();
+        pb->Inc();
+
+        // write header
+        dtH.version		= DETAIL_VERSION;
+        dtH.object_count= object_idx;
+
+        F.w_chunk		(DETMGR_CHUNK_HEADER,&dtH,sizeof(DetailHeader));
+
+    	bRes 			= F.save_to(fn.c_str());
+    }
+
+    pb->Inc();
+	EContext.UI->ProgressEnd(pb);
+    return bRes;
+}
+
+void EDetailManager::OnDensityChange(PropValue* prop)
+{
+	InvalidateCache		();
+}	
+
+void EDetailManager::OnBaseTextureChange(PropValue* prop)
+{
+	m_Base.OnImageChange	(prop);
+    InvalidateSlots			();
+    ELog.DlgMsg				(mtInformation,"Texture changed. Reinitialize objects.");
+}
+
+void EDetailManager::FillProp(const char* pref, PropItemVec& items)
+{
+	PropValue* P;
+    P=PHelper().CreateFloat	(items, PrepareKey(pref,"Objects per square"),				&ps_r__Detail_density);
+    P->OnChangeEvent.bind	(this,&EDetailManager::OnDensityChange);
+    P=PHelper().CreateChoose(items, PrepareKey(pref,"Base Texture"),					&m_Base.name, smTexture);
+    P->OnChangeEvent.bind	(this,&EDetailManager::OnBaseTextureChange);
+    PHelper().CreateFlag32	(items, PrepareKey(pref,"Common\\Draw objects"),			&m_Flags,	flObjectsDraw);
+    PHelper().CreateFlag32	(items, PrepareKey(pref,"Common\\Draw base texture"),		&m_Flags,	flBaseTextureDraw);
+    PHelper().CreateFlag32	(items, PrepareKey(pref,"Common\\Base texture blended"),	&m_Flags,	flBaseTextureBlended);
+    PHelper().CreateFlag32	(items, PrepareKey(pref,"Common\\Draw slot boxes"),			&m_Flags,	flSlotBoxesDraw);
+}
+
+void EDetailManager::ClearMask()
+{
+	if (!m_Base.Valid())
+		return;
+	for (u32 Index = 0; Index < m_Base.data.size(); ++Index)
+	{
+		Fcolor Color; Color.set(m_Base.data[Index]);
+		Color.a = 0.f;
+		m_Base.data[Index] = Color.get();
+	}
+	BaseDataDirty = true;
+	InvalidateSlots();
+	ELog.DlgMsg(mtInformation, "Grass mask cleared. Press 'Reinit Objects Only' to apply.");
+}
+
+void EDetailManager::EnsureBaseTexture()
+{
+	if (m_Base.Valid())
+		return;
+
+	if (m_Base.LoadImage("ed\\empty_details"))
+	{
+		m_Base.CreateShader();
+		m_RTFlags.set(flRTGenerateBaseMesh, true);
+		InvalidateSlots();
+		ELog.DlgMsg(mtInformation, "No base texture set. Using empty base texture 'ed/empty_details' to rebuild slot information.");
+	}
+	else
+	{
+		ELog.DlgMsg(mtError, "EDetailManager: Can't load empty base texture 'ed/empty_details'.");
+	}
+}
+
+bool EDetailManager::PickPaintPoint(Fvector& Point)
+{
+	float BestDist = EContext.UI->ZFar();
+	bool Found = false;
+	SRayPickInfo PickInfo;
+	for (ObjectIt It = m_SnapObjects.begin(); It != m_SnapObjects.end(); ++It)
+	{
+		CCustomObject* Object = *It;
+		float Dist = BestDist;
+		if (Object->RayPick(Dist, EContext.UI->m_CurrentRStart, EContext.UI->m_CurrentRDir, &PickInfo) && Dist < BestDist)
+		{
+			BestDist = Dist;
+			Found = true;
+		}
+	}
+
+	if (Found)
+	{
+		Point.mad(EContext.UI->m_CurrentRStart, EContext.UI->m_CurrentRDir, BestDist);
+	}
+	return Found;
+}
+
+void EDetailManager::EnsurePaintResolution()
+{
+	// A low-resolution base (e.g. the 64x64 'ed/empty_details') spans many detail slots
+	// per texel, so a brush stroke barely touches any texel. Upscale the mask once so that
+	// every slot quadrant gets its own texel. Nearest sampling keeps the exact colors that
+	// the color indices are matched against.
+	const float TargetTexelSize = DETAIL_SLOT_SIZE_2;
+	const u32 MaxSize = 4096;
+
+	const float WorldW = m_BBox.max.x - m_BBox.min.x;
+	const float WorldH = m_BBox.max.z - m_BBox.min.z;
+	if (WorldW < EPS_L || WorldH < EPS_L)
+		return;
+
+	const u32 NewW = std::min(MaxSize, (u32)iCeil(WorldW / TargetTexelSize) + 1);
+	const u32 NewH = std::min(MaxSize, (u32)iCeil(WorldH / TargetTexelSize) + 1);
+	if (NewW <= m_Base.w && NewH <= m_Base.h)
+		return;
+
+	const u32 DstW = std::max(NewW, m_Base.w);
+	const u32 DstH = std::max(NewH, m_Base.h);
+
+	U32Vec Resized(DstW * DstH);
+	for (u32 V = 0; V < DstH; ++V)
+	{
+		const u32 SrcV = std::min(m_Base.h - 1, (u32)iFloor((float(V) / float(DstH - 1)) * float(m_Base.h - 1) + 0.5f));
+		for (u32 U = 0; U < DstW; ++U)
+		{
+			const u32 SrcU = std::min(m_Base.w - 1, (u32)iFloor((float(U) / float(DstW - 1)) * float(m_Base.w - 1) + 0.5f));
+			Resized[V * DstW + U] = m_Base.data[SrcV * m_Base.w + SrcU];
+		}
+	}
+
+	m_Base.data.swap(Resized);
+	m_Base.w = DstW;
+	m_Base.h = DstH;
+	BaseDataDirty = true;
+}
+
+void EDetailManager::RegenerateSlotsUnderBrush(const Fvector& WorldPoint)
+{
+	if (!dtSlots || objects.empty() || m_ColorIndices.empty())
+		return;
+
+	// detail slots are read by the parallel cache-update task; finish it
+	// before mutating dtSlots to avoid a data race
+	Device.DetailsTask.wait();
+
+	int Sx = toSlotX(WorldPoint.x - BrushSize);
+	int Ex = toSlotX(WorldPoint.x + BrushSize);
+	int Sz = toSlotZ(WorldPoint.z - BrushSize);
+	int Ez = toSlotZ(WorldPoint.z + BrushSize);
+
+	Sx = clampr(Sx, 0, (int)dtH.size_x - 1);
+	Ex = clampr(Ex, 0, (int)dtH.size_x - 1);
+	Sz = clampr(Sz, 0, (int)dtH.size_z - 1);
+	Ez = clampr(Ez, 0, (int)dtH.size_z - 1);
+
+	for (int z = Sz; z <= Ez; ++z)
+		for (int x = Sx; x <= Ex; ++x)
+		{
+			float Cx = fromSlotX(x);
+			float Cz = fromSlotZ(z);
+			if (sqrtf((Cx - WorldPoint.x)*(Cx - WorldPoint.x) + (Cz - WorldPoint.z)*(Cz - WorldPoint.z)) <= BrushSize)
+			{
+				UpdateSlotObjects(x, z);
+				// refresh only the touched cache slot instead of rebuilding
+				// the whole detail cache (a full reinit resets the decompress
+				// queue and makes grass vanish until the stroke ends)
+				int Gx = w2cg_X(x - dtH.offs_x);
+				int Gz = w2cg_Z(z - dtH.offs_z);
+				if (Gx >= 0 && Gx < (int)dm_cache_line && Gz >= 0 && Gz < (int)dm_cache_line)
+				{
+					Slot* Slot = cache[Gz][Gx];
+					if (Slot) UnpackSlot(Gx, Gz, Slot);
+				}
+			}
+		}
+
+	// slots that switched between empty and non-empty change the slide window
+	// visibility, which cache_Update otherwise refreshes only on camera moves
+	RequestSlideWindowUpdate();
+}
+
+void EDetailManager::PaintAt(const Fvector& WorldPoint)
+{
+	if (!m_Base.Valid())
+		return;
+
+	const Fbox& Box = m_BBox;
+	float WorldW = Box.max.x - Box.min.x;
+	float WorldH = Box.max.z - Box.min.z;
+	if (WorldW < EPS_L || WorldH < EPS_L)
+		return;
+
+	EnsurePaintResolution();
+
+	float TexW = (float)m_Base.w;
+	float TexH = (float)m_Base.h;
+	if (TexW < 2.f || TexH < 2.f)
+		return;
+
+	float Sx = (TexW - 1.f) / WorldW;	// текселей на мировую единицу по X
+	float Sz = (TexH - 1.f) / WorldH;	// текселей на мировую единицу по Z
+
+	int CenterU = m_Base.GetPixelUFromX(WorldPoint.x, Box);
+	int CenterV = m_Base.GetPixelVFromZ(WorldPoint.z, Box);
+	int RadiusPixX = iCeil(BrushSize * Sx);
+	int RadiusPixZ = iCeil(BrushSize * Sz);
+
+	Fcolor Paint = PaintColor;
+	for (int Dv = -RadiusPixZ; Dv <= RadiusPixZ; ++Dv)
+	{
+		int V = CenterV + Dv;
+		if (V < 0 || V >= (int)m_Base.h)
+			continue;
+		for (int Du = -RadiusPixX; Du <= RadiusPixX; ++Du)
+		{
+			int U = CenterU + Du;
+			if (U < 0 || U >= (int)m_Base.w)
+				continue;
+
+			float WorldX = Box.min.x + (float(U) / (TexW - 1.f)) * WorldW;
+			float WorldZ = Box.min.z + (1.f - (float(V) / (TexH - 1.f))) * WorldH;
+			float Dx = WorldX - WorldPoint.x;
+			float Dz = WorldZ - WorldPoint.z;
+			float Dist = sqrtf(Dx * Dx + Dz * Dz);
+			if (Dist > BrushSize)
+				continue;
+
+			float Falloff = 1.f - Dist / BrushSize;
+			Falloff = Falloff * Falloff * (3.f - 2.f * Falloff); // smoothstep
+
+			u32 Index = (u32)(U + V * m_Base.w);
+			Fcolor Current; Current.set(m_Base.data[Index]);
+
+			if (PaintErase)
+			{
+				Current.a = Current.a * (1.f - Falloff);
+			}
+			else
+			{
+				float TargetA = BrushStrength;
+				Current.a = Current.a + (TargetA - Current.a) * Falloff;
+				Current.r = Current.r + (Paint.r - Current.r) * Falloff;
+				Current.g = Current.g + (Paint.g - Current.g) * Falloff;
+				Current.b = Current.b + (Paint.b - Current.b) * Falloff;
+			}
+			m_Base.data[Index] = Current.get();
+		}
+	}
+
+	BaseDataDirty = true;
+	RegenerateSlotsUnderBrush(WorldPoint);
+}
+
+void EDetailManager::RenderBrush()
+{
+	if (!BrushActive)
+		return;
+
+	const int Segments = 32;
+	Fvector Prev, Current;
+	for (int Index = 0; Index <= Segments; ++Index)
+	{
+		float Angle = Index * PI * 2.f / Segments;
+		Current.set(BrushPos.x + cosf(Angle) * BrushSize, BrushPos.y + 0.2f, BrushPos.z + sinf(Angle) * BrushSize);
+
+		if (Index > 0)
+			DU_impl.DrawLine(Prev, Current, PaintErase ? 0xFFFF4040 : 0xFF40FF40);
+
+		Prev = Current;
+	}
+}
+
+bool EDetailManager::GetSummaryInfo(SSceneSummary* inf)
+{
+	for (DetailIt it=objects.begin(); it!=objects.end(); it++){
+    	((EDetail*)(*it))->OnDeviceCreate();
+        CEditableObject* E 	= ((EDetail*)(*it))->m_pRefs;
+		if (!E)				continue;
+	    CSurface* surf		= E->m_Surfaces.front(); VERIFY(surf);
+		inf->AppendTexture	(surf->m_Texture.c_str(),SSceneSummary::sttDO,0,0,"$DETAILS$");
+    }
+    return true;
+}
+

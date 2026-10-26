@@ -1,0 +1,92 @@
+#pragma once
+#include "../../xrUI/Widgets/UIWindow.h"
+
+
+class CInventoryItem;
+class CUIStatic;
+class CUI3dStatic;
+class CUIScrollView;
+class CUIProgressBar;
+class CUIConditionParams;
+class CUIWpnParams;
+class CUIKnifeParams;
+class CUIArtefactParams;
+class CUIFrameWindow;
+class UIInvUpgPropertiesWnd;
+class CUIOutfitInfo;
+class CUIBoosterInfo;
+class CUICellItem;
+class CUIGrenadeParams;
+
+extern const char * const 		fieldsCaptionColor;
+
+class CUIItemInfo final : public CUIWindow
+{
+private:
+	typedef CUIWindow inherited;
+	struct _desc_info
+	{
+		CGameFont*			pDescFont;
+		u32					uDescClr;
+		bool				bShowDescrText;
+	};
+	_desc_info				m_desc_info;
+	CInventoryItem* m_pInvItem;
+	float BaseTooltipWidth = 0.0f;
+	float BaseDescriptionWidth = 0.0f;
+	float BaseNameWidth = 0.0f;
+	float BaseTradeTipWidth = 0.0f;
+	float BaseCostX = 0.0f;
+public:
+						CUIItemInfo			();
+	virtual				~CUIItemInfo		();
+	CInventoryItem*		CurrentItem			() const {return m_pInvItem;}
+	void				InitItemInfo		(Fvector2 pos, Fvector2 size, const char* xml_name);
+	bool				InitItemInfo		(const char* xml_name);
+	void				InitItem			(CUICellItem* pCellItem, CInventoryItem* pCompareItem = NULL, u32 item_price=u32(-1), const char* trade_tip=NULL, bool overrideCorrectionByWeight = false);
+
+
+	void				TryAddConditionInfo	(CInventoryItem& pInvItem, CInventoryItem* pCompareItem);
+	void				TryAddWpnInfo		(CInventoryItem& pInvItem, CInventoryItem* pCompareItem);
+	void				TryAddKnifeInfo		(CInventoryItem& pInvItem, CInventoryItem* pCompareItem);
+	void				TryAddGrenadeInfo	(CInventoryItem& pInvItem, CInventoryItem* pCompareItem);
+	void				TryAddArtefactInfo	(CInventoryItem& pInvItem);
+	void				TryAddOutfitInfo	(CInventoryItem& pInvItem, CInventoryItem* pCompareItem);
+	void				TryAddUpgradeInfo	(CInventoryItem& pInvItem);
+	void				TryAddBoosterInfo	(CInventoryItem& pInvItem);
+	void				ScrollDown			();
+	void				ScrollUp			();
+
+	virtual CUIWindow* ui_cast_window() { return this; }
+
+	virtual void		Draw				();
+	bool				m_b_FitToHeight;
+	u32					delay;
+	
+	CUIFrameWindow*		UIBackground;
+	CUIStatic*			UIName;
+	CUIStatic*			UIWeight;
+	CUIStatic*			UICost;
+	CUIStatic*			UITradeTip;
+//	CUIStatic*			UIDesc_line;
+	CUIScrollView*		UIDesc;
+	bool				m_complex_desc;
+
+	CUIConditionParams*		UIConditionWnd;
+	CUIWpnParams*			UIWpnParams;
+	CUIKnifeParams*			UIKnifeParams;
+	CUIArtefactParams*		UIArtefactParams;
+	CUIArtefactParams*		UIOutfitParams;
+	CUIArtefactParams*		UIBackpackParams;
+	UIInvUpgPropertiesWnd*	UIProperties;
+	CUIOutfitInfo*			UIOutfitInfo;
+	CUIBoosterInfo*			UIBoosterInfo;
+	CUIGrenadeParams*		UIGrenadeParams;
+	// legacy
+	CUIStatic*				UICondition;
+	CUIProgressBar*			UICondProgresBar;
+	CUIProgressBar*			UIFilterCondProgresBar;
+
+	Fvector2			UIItemImageSize; 
+	CUI3dStatic*		UIItemImage;
+};

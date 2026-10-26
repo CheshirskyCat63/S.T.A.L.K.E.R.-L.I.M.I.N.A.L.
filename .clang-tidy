@@ -1,0 +1,46 @@
+Checks: 'readability-identifier-naming'
+CheckOptions:
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+    
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+    
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+    
+  - key: readability-identifier-naming.ConstantCase
+    value: CamelCase
+    
+  - key: readability-identifier-naming.FunctionCase
+    value: CamelCase
+    
+  - key: readability-identifier-naming.VariableCase
+    value: CamelCase
+    
+  - key: readability-identifier-naming.MemberCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.NamespaceCase
+    value: CamelCase
+    
+  # IgnoredRegexp is per kind and must match the whole name
+  - key: readability-identifier-naming.ClassIgnoredRegexp
+    value: '(xr_|C[A-Z]|F[A-Z]|I[A-Z]|E[A-Z]|g_).*'
+  - key: readability-identifier-naming.StructIgnoredRegexp
+    value: '(xr_|C[A-Z]|F[A-Z]|I[A-Z]|E[A-Z]|g_).*'
+  - key: readability-identifier-naming.EnumIgnoredRegexp
+    value: '(xr_|C[A-Z]|F[A-Z]|I[A-Z]|E[A-Z]|g_).*'
+  - key: readability-identifier-naming.ConstantIgnoredRegexp
+    value: '(xr_|C[A-Z]|F[A-Z]|I[A-Z]|E[A-Z]|g_).*'
+  - key: readability-identifier-naming.FunctionIgnoredRegexp
+    value: '(xr_|C[A-Z]|F[A-Z]|I[A-Z]|E[A-Z]|g_).*'
+  - key: readability-identifier-naming.VariableIgnoredRegexp
+    value: '(xr_|C[A-Z]|F[A-Z]|I[A-Z]|E[A-Z]|g_).*'
+  - key: readability-identifier-naming.MemberIgnoredRegexp
+    value: '(xr_|C[A-Z]|F[A-Z]|I[A-Z]|E[A-Z]|g_).*'
+  - key: readability-identifier-naming.NamespaceIgnoredRegexp
+    value: '(xr_|C[A-Z]|F[A-Z]|I[A-Z]|E[A-Z]|g_).*'
+    
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE

@@ -1,0 +1,417 @@
+#pragma once
+
+class CSE_Abstract;
+class CPhysicItem;
+class NET_Packet;
+class CInventoryItem;
+class CMotionDef;
+class CCustomDetector;
+class CCustomDevice;
+class CWeaponMagazined;
+class CWeaponMagazinedWGrenade;
+class CWeaponBinoculars;
+class CWeaponKnife;
+class CWeaponBM16;
+class CWeaponRPG7;
+class CWeaponRG6;
+class CWeapon;
+class CMissile;
+class CBolt;
+class CGrenade;
+class CPhysicsShellHolder;
+
+#include "actor_defs.h"
+#include "inventory_space.h"
+#include "HudSound.h"
+#include "InertionData.h"
+#include "../xrScripts/script_export_space.h"
+#include "player_hud.h"
+
+#include "HudTorchLight.h"
+#include "Descs/HudItemDesc.h"
+
+struct attachable_hud_item;
+class motion_marks;
+
+//class HudLightTorch;
+
+ENGINE_API extern float psHUD_FOV_def;
+
+class CHUDState
+{
+public:
+enum EHudStates : u8
+{
+		eIdle = 0,
+		eShowing,
+		eHiding,
+		eHidden,
+		eBore,
+		eSprintStart,
+		eSprintEnd,
+		eDeviceSwitch,
+		ePrepareDetector,
+		eFinishDetector,
+		eLastBaseState = eFinishDetector,
+};
+
+private:
+	u8						m_hud_item_state = EHudStates::eHidden;
+	u32						m_dw_curr_state_time;
+protected:
+	u32						m_dw_curr_substate_time;
+	u8 m_nextState = EHudStates::eHidden;
+public:
+							CHUDState			()					{SetState(eHidden);}
+	IC		u8				GetNextState		() const			{return		m_nextState;}
+	IC		u8				GetState			() const			{return		m_hud_item_state;}
+
+	IC		void			SetState			(u8 v)				{m_hud_item_state = v; m_dw_curr_state_time=Device.dwTimeGlobal;ResetSubStateTime();}
+	IC		virtual void	SetNextState		(u8 v)				{m_nextState = v;}
+	IC		u32				CurrStateTime		() const			{return Device.dwTimeGlobal-m_dw_curr_state_time;}
+	IC		void			ResetSubStateTime	()					{m_dw_curr_substate_time=Device.dwTimeGlobal;}
+	virtual void			SwitchState			(u8 S)				= 0;
+	virtual void			OnStateSwitch		(u8 S)				= 0;
+};
+
+class CHudItem : public CHUDState
+{
+public:
+	CHudItem();
+	virtual	~CHudItem() = default;
+	virtual DLL_Pure* _construct();
+
+	struct
+	{
+		const CMotionDef* m_current_motion_def = nullptr;
+		shared_str m_current_motion;
+		u32 m_dwMotionCurrTm;
+		u32 m_dwMotionStartTm;
+		u32 m_dwMotionEndTm;
+		u8 m_startedMotionState;
+		u8 m_started_rnd_anim_idx = u8(-1);
+		bool m_bStopAtEndAnimIsRunning = false;
+	};
+
+protected:
+
+	bool Pending = false;
+	virtual void switch2_Bore();
+
+public:
+	virtual void				Load				(const char* section);
+	virtual void				LoadSounds			(const char* section);
+	virtual	bool				net_Spawn			(CSE_Abstract* DC)				{return true;};
+	virtual void				net_Destroy			()								{};
+	virtual void				OnEvent				(NET_Packet& P, u16 type);
+
+	virtual void				OnH_A_Chield		();
+	virtual void				OnH_B_Chield		();
+	virtual void				OnH_B_Independent	(bool just_before_destroy);
+	virtual void				OnH_A_Independent	();
+	
+	virtual void				PlaySound			(const char* alias, const Fvector& position, bool allowOverlap = false);
+
+	virtual bool				Action				(u16 cmd, u32 flags)			{return false;}
+			void				OnMovementChanged	(ACTOR_DEFS::EMoveCommand cmd)	;
+	
+	virtual	EHudOffsetType		GetCurrentHudOffsetIdx () const {return EHudOffsetType::eDefault;}
+
+	bool						GetHUDmode			();
+	bool						GetHUDSoundMode		();
+	IC bool IsPending() const { return Pending; }
+
+	IC virtual bool IsZoomed() const { return false; }
+
+	virtual bool				ActivateItem		();
+	virtual void				DeactivateItem		();
+	virtual bool				SendDeactivateItem	(bool Force);
+	virtual void				OnActiveItem		()				{};
+	virtual void				OnHiddenItem		()				{};
+	virtual void				SendHiddenItem		();			//same as OnHiddenItem but for client... (sends message to a server)...
+	virtual void				OnMoveToRuck		(const SInvItemPlace& prev);
+
+	bool						IsHidden			()	const		{	return GetState() == eHidden;}						// Does weapon is in hidden state
+	bool						IsHiding			()	const		{	return GetState() == eHiding;}
+	bool						IsShowing			()	const		{	return GetState() == eShowing;}
+
+	virtual void				SwitchState			(u8 S);
+	virtual void				OnStateSwitch		(u8 S);
+
+	virtual void				OnAnimationEnd		(u8 state);
+	virtual void				OnMotionMark		(u8 state, const motion_marks&);
+
+	virtual void				PlayAnimIdle		();
+	virtual void				PlayAnimBore		();
+	virtual void				PlayAnimDeviceSwitch();
+	bool						TryPlayAnimIdle		();
+	virtual bool				MovingAnimAllowedNow ()				{return true;}
+
+	virtual void				PlayAnimIdleMoving();
+	virtual void				PlayAnimIdleMovingSlow();
+	virtual void				PlayAnimIdleMovingCrouch();
+	virtual void				PlayAnimIdleMovingCrouchSlow();
+	virtual void				PlayAnimIdleSprint();
+
+	virtual void				UpdateCL			();
+	virtual void				renderable_Render	();
+
+
+	virtual void				UpdateHudAdditonal	(Fmatrix&);
+	bool						GetHudLookInertia	(Fmatrix& pre, Fmatrix& xform) const;
+
+
+	virtual	void				UpdateXForm			()						= 0;
+
+	u32							PlayHUDMotion		(const shared_str& M, EHudMixType bMixIn, u8 state, bool disableRandom = false);
+	u32							PlayHUDMotion		(const shared_str& M, const shared_str& M2, EHudMixType bMixIn, u8 state, bool disableRandom = false);
+	u32							PlayHUDMotion_noCB	(const shared_str& M, EHudMixType bMixIn, bool disableRandom);
+	void						StopCurrentAnimWithoutCallback();
+	bool						AddSuffixName		(shared_str& anim, const char* suffix, const char* test_suffix = "");
+	virtual shared_str			SetCurrentIdleAnimation();
+	virtual shared_str			SetCurrentStateAnimation(const shared_str& first_name) { return first_name; }
+
+	attachable_hud_item*		HudItemData				();
+	virtual void				on_a_hud_attach			();
+	virtual bool				HudAnimationExist		(const shared_str& anim_name, bool only_for_actor = true);
+	virtual void				on_b_hud_detach			();
+	virtual void				render_hud_mode			()					{};
+	virtual bool				need_renderable			()					{return true;};
+	virtual void render_item_3d_ui();
+	virtual bool render_item_3d_ui_query();
+
+	virtual bool				CheckCompatibility		(CHudItem*)			{return true;}
+
+	void PlayBonePartAnim(const shared_str& anim, bool bMixIn);
+
+	virtual float GetHudFov();
+	void PlaySoundIfExist(const char* alias, const Fvector& position, bool allowOverlap);
+	virtual bool AllowBore() { return !HudDesc().m_bDisableBore && m_eAnimationsFlags.test(EAnimationsFlags::af_bore); }
+
+	float getLookOutSpeedKoef() const { return HudDesc().m_fLookOutSpeedKoef; }
+	float getLookOutAmplK() const { return HudDesc().m_fLookOutAmplK; }
+	float getActorCamSpeedFactor() const { return m_fActorCamSpeedFactor; }
+
+	bool CanStartAction(CActor* pActor);
+	bool SetKeyRepeatFlag(u32 kfACTTYPE);
+
+	virtual bool NeedMovementBlend() const;
+
+	script_layer* PlayBlendAnm(const shared_str& name, float speed, float power, Fvector2 blend_factors, bool looped, bool mix, bool restart, u8 part, u8 item, u8 state);
+	void StopBlendAnm(const shared_str& name, bool Force = false);
+	void StopAllBlendAnms(bool Force = false, u8 part = 2);
+	bool IsBlendAnmActive(const shared_str& name);
+
+	virtual void OnBlendEnd(u8 state) {}
+	virtual void OnBlendStart(u8 state) {}
+
+	bool UseBlendMovement() const { return HudDesc().m_bBlendMovement; }
+
+	enum EDevicesFlags
+	{
+		df_torch = (1 << 0),
+		df_nvg = (1 << 1),
+		df_clear_mask = (1 << 2),
+		df_tacticaltorch = (1 << 3),
+		df_laser = (1 << 4),
+	};
+
+	enum EAnimationsFlags : u64
+	{
+		af_torch = (1 << 0),
+		af_nvg = (1 << 1),
+		af_clear_mask = (1 << 2),
+		af_prepare_detector = (1 << 3),
+		af_finish_detector = (1 << 4),
+		af_det_hand_draw = (1 << 5),
+		af_det_hand_hide = (1 << 6),
+		af_det_hand_throw_start = (1 << 7),
+		af_det_hand_throw_idle = (1 << 8),
+		af_det_hand_throw_end = (1 << 9),
+		af_det_hand_kick = (1 << 10),
+		af_det_hand_lam = (1 << 11),
+		af_bore = (1 << 12),
+		af_firemode = (1 << 13),
+		af_empty_click = (1 << 14),
+		af_aim_in_out = (1 << 15),
+		af_sprint_in_out = (1 << 16),
+		af_kick = (1 << 17),
+		af_mag_check = (1 << 18),
+		af_firemode_check = (1 << 19),
+		af_chamber_load = (1 << 20),
+		af_chamber_unload = (1 << 21),
+		af_chamber_check = (1 << 22),
+		af_det_hand_shoot = (1 << 23),
+		af_det_hand_dry = (1 << 24),
+		af_det_hand_jammed = (1 << 25),
+		af_det_hand_lightmis = (1 << 26),
+		af_det_hand_firemode = (1 << 27),
+		af_safemode_in_out = (1 << 28),
+		af_sprint = (1 << 29),
+		af_moving = (1 << 30),
+		af_alt_kick = (1u << 31),
+	};
+
+	enum EBPAnimsFlags : u64
+	{
+		abpf_idle = (1 << 0),
+		abpf_idle_empty = (1 << 1),
+		abpf_idle_jammed = (1 << 2),
+		abpf_firemode = (1 << 3),
+	};
+
+	enum ESoundsFlags : u64
+	{
+		sf_headlamp = (1 << 0),
+		sf_nv = (1 << 1),
+		sf_prepare_detector = (1 << 2),
+		sf_finish_detector = (1 << 3),
+		sf_changefiremode = (1 << 4),
+		sf_aim_start = (1 << 5),
+		sf_aim_end = (1 << 6),
+		sf_reload_empty = (1 << 7),
+		sf_reload_jam = (1 << 8),
+		sf_reload_empty_det = (1 << 9),
+		sf_reload_jam_det = (1 << 10),
+		sf_reload_jam_last = (1 << 11),
+		sf_reload_jam_last_det = (1 << 12),
+		sf_draw = (1 << 13),
+		sf_holster = (1 << 14),
+		sf_throw_begin = (1 << 15),
+		sf_throw = (1 << 16),
+		sf_kick = (1 << 17),
+		sf_grenade_change = (1 << 18),
+		sf_switch_g = (1 << 19),
+		sf_reload_change = (1 << 20),
+		sf_tacticaltorch = (1 << 21),
+		sf_laser = (1 << 22),
+		sf_breechblock = (1 << 23),
+		sf_jam = (1 << 24),
+		sf_throw_cancel = (1ull << 25),
+	};
+
+	enum ESoundsFlags2 : u64
+	{
+		sf_draw_g = (1 << 0),
+		sf_holster_g = (1 << 1),
+		sf_draw_w_gl = (1 << 2),
+		sf_holster_w_gl = (1 << 3),
+		sf_draw_empty = (1 << 4),
+		sf_holster_empty = (1 << 5),
+		sf_draw_jam = (1 << 6),
+		sf_holster_jam = (1 << 7),
+		sf_draw_empty_g = (1 << 8),
+		sf_holster_empty_g = (1 << 9),
+		sf_draw_empty_w_gl = (1 << 10),
+		sf_holster_empty_w_gl = (1 << 11),
+		sf_draw_jam_w_gl = (1 << 12),
+		sf_holster_jam_w_gl = (1 << 13),
+		sf_draw_jam_g = (1 << 14),
+		sf_holster_jam_g = (1 << 15),
+		sf_chamber_check_empty = (1 << 16),
+		sf_pump_aim = (1 << 17),
+		sf_pump_last = (1 << 18),
+		sf_pump_aim_last = (1 << 19),
+		sf_pump_empty = (1 << 20),
+		sf_pump_aim_empty = (1 << 21),
+		sf_bore_empty = (1 << 22),
+		sf_bore_jammed = (1 << 23),
+		sf_sprint_start = (1 << 24),
+		sf_sprint_end = (1 << 25),
+		sf_safemode_in_out = (1 << 26),
+		sf_mag_shot = (1u << 27),
+	};
+
+	Flags32 m_eDevicesFlags;
+	Flags64 m_eAnimationsFlags;
+	Flags32 m_eBonePartAnimationsFlags;
+	Flags64 m_eSoundsFlags;
+	Flags64 m_eSoundsFlags2;
+
+	bool bDisablePrepareAnimation = false;
+
+	virtual bool WpnCanShoot() const { return false; }
+	bool SoundExist(const char* section, const char* sound_name);
+
+	const SHudJitterParams& GetCurJitterParams() const { return HudDesc().m_jitter_params; }
+	THudLightTorch* GetHudLight();
+
+	bool m_disable_random_animations = false;
+
+	Fmatrix ScriptUIMatrix = Fidentity;
+	shared_str ScriptUIBone;
+	shared_str ScriptUIFunctor;
+	CUIWindow* ScriptWindow = nullptr;
+
+	bool m_bSwitchSprint = false;
+
+protected:
+
+	IC void SetPending(bool H) { Pending = H; }
+	shared_str					hud_sect;
+	shared_str					hud_sect_cache;
+
+	//кадры момента пересчета XFORM и FirePos
+	u32							dwFP_Frame;
+	u32							dwXF_Frame;
+
+	u32							m_animation_slot;
+
+	HUD_SOUND_COLLECTION		m_sounds;
+	HUD_SOUND_COLLECTION_LAYERED m_layered_sounds;
+	InertionData				m_current_inertion;
+	float						m_fActorCamSpeedFactor = 1.0f;
+
+	const SHudItemDesc*			CurrentHudDesc = nullptr;
+
+	float						m_fHudYawInertia = 0.0f;
+	float						m_fHudPitchInertia = 0.0f;
+	float						m_fHudRollInertia = 0.0f;
+	Fvector						m_vHudInertiaVelocity = {};
+	Fmatrix						m_HudLookInertiaPre = Fidentity;
+	Fmatrix						m_HudLookInertia = Fidentity;
+	u32							m_HudLookInertiaFrame = u32(-1);
+
+	virtual void				SetModelBoneStatus(const char* bone, bool show);
+	virtual void				SetMultipleBonesStatus(const char* section, const char* line, bool show);
+
+private:
+	CPhysicItem					*m_object;
+	CInventoryItem				*m_item;
+
+public:
+	const shared_str&			HudSection				() const		{ return hud_sect;}
+	const SHudItemDesc&			HudDesc					() const		{ VERIFY(CurrentHudDesc); return *CurrentHudDesc;}
+	void						SetHudSection			(const shared_str& Section);
+	IC CPhysicItem&				object					() const		{ VERIFY(m_object); return(*m_object);}
+	IC CInventoryItem&			item					() const		{ VERIFY(m_item); return(*m_item);}
+	IC		u32					animation_slot			()				{ return m_animation_slot;}
+	InertionData&				CurrentInertionData		()				{ return m_current_inertion;}
+
+	virtual void				on_renderable_Render	() = 0;
+	virtual void				debug_draw_firedeps		() {};
+
+	virtual CHudItem*			cast_hud_item			()				{ return this; }
+	virtual CCustomDetector*	cast_custom_detector	()				{ return nullptr; }
+	virtual CCustomDevice*		cast_custom_device		()				{ return nullptr; }
+	virtual CWeaponBinoculars* cast_weapon_binoculars() { return nullptr; }
+	virtual CWeaponKnife* cast_weapon_knife() { return nullptr; }
+	virtual CWeaponMagazined* cast_weapon_magazined() { return nullptr; }
+	virtual CWeaponMagazinedWGrenade* cast_weapon_magazined_w_grenade() { return nullptr; }
+	virtual CWeaponBM16* cast_weapon_bm16() { return nullptr; }
+	virtual CWeapon* cast_weapon() { return nullptr; }
+	virtual CWeaponRPG7* cast_weapon_rpg7() { return nullptr; }
+	virtual CWeaponRG6* cast_weapon_rg6() { return nullptr; }
+	virtual CGrenade* cast_grenade() { return nullptr; }
+	virtual CMissile* cast_missile() { return nullptr; }
+	virtual CBolt* cast_bolt() { return nullptr; }
+	virtual CInventoryItem* cast_inventory_item() { return nullptr; }
+	virtual CPhysicsShellHolder* cast_physics_shell_holder() { return nullptr; }
+	virtual CPhysicItem* cast_physics_item() { return nullptr; }
+	virtual CWeaponShotgun* cast_weapon_shotgun() { return nullptr; }
+	virtual float GetAimFactor() const { return 0.0f; }
+
+protected:
+	DECLARE_SCRIPT_REGISTER_FUNCTION
+};
+

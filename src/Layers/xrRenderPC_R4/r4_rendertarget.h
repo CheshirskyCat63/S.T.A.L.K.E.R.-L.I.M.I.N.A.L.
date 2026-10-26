@@ -1,0 +1,467 @@
+#pragma once
+
+#include "../xrRender/ColorMapManager.h"
+#include "../xrRender/ScreenPostProcessTypes.h"
+
+class light;
+
+//#define DU_SPHERE_NUMVERTEX 92
+//#define DU_SPHERE_NUMFACES	180
+//#define DU_CONE_NUMVERTEX	18
+//#define DU_CONE_NUMFACES	32
+//	no less than 2
+#define	VOLUMETRIC_SLICES	100
+
+class CRenderTarget		: public IRender_Target
+{
+private:
+	u32							dwWidth;
+	u32							dwHeight;
+	u32							dwAccumulatorClearMark;
+public:
+	enum	eStencilOptimizeMode
+	{
+		SO_Light = 0,	//	Default
+		SO_Combine,		//	Default
+	};
+
+	u32							dwLightMarkerID;
+	// 
+	IBlender* b_occq = nullptr;
+	IBlender* b_accum_mask = nullptr;
+	IBlender* b_accum_direct = nullptr;
+	IBlender* b_accum_point = nullptr;
+	IBlender* b_accum_spot = nullptr;
+	IBlender* b_accum_reflected = nullptr;
+	IBlender* b_bloom = nullptr;
+	IBlender* b_luminance = nullptr;
+	IBlender* b_combine = nullptr;
+	IBlender* b_ssao = nullptr;
+
+	IBlender* b_fxaa = nullptr;
+	IBlender* b_spp = nullptr;
+	IBlender* b_bodycam = nullptr;
+	ref_shader s_bodycam;
+	IBlender* b_gasmask = nullptr;
+	IBlender* b_smaa = nullptr;
+	IBlender* b_scale = nullptr;
+	IBlender* b_cas = nullptr;
+	IBlender* b_gtao = nullptr;
+	IBlender* b_taa = nullptr;
+	IBlender* b_gamma = nullptr;
+	IBlender* b_nvg = nullptr;
+	IBlender* b_sslr = nullptr;
+
+	//============== new bloom and lum ============
+	IBlender* b_bloom_downsample = nullptr;
+	IBlender* b_bloom_upsample = nullptr;
+	IBlender* b_new_adaptation = nullptr;
+	//=============================================
+
+	//============== new Depth of Field ==============
+	IBlender* b_new_dof = nullptr;
+
+#ifdef DEBUG
+	struct		dbg_line_t		{
+		Fvector	P0,P1;
+		u32		color;
+	};
+	xr_vector<std::pair<Fsphere,Fcolor> >		dbg_spheres;
+	xr_vector<dbg_line_t>										dbg_lines;
+	xr_vector<Fplane>												dbg_planes;
+#endif
+	
+	ref_rt						rt_sslr;
+	ref_rt						rt_sslr_temp;
+	ref_rt						rt_sslr_old;
+	ref_rt						rt_sslr_data;
+	ref_rt						rt_sslr_hiz;
+
+	// MRT-path
+	ref_rt						rt_Generic;
+	ref_rt						rt_Back_Buffer;
+	ref_rt						rt_Back_Buffer_AA;
+	ref_rt						rt_Position;		// 64bit,	fat	(x,y,z,?)				(eye-space)
+	ref_rt						rt_Normal;			// 64bit,	fat	(x,y,z,hemi)			(eye-space)
+	ref_rt						rt_Color;			// 64/32bit,fat	(r,g,b,specular-gloss)	(or decompressed MET-8-8-8-8)
+	ref_rt						rt_Surface;
+	ref_rt						rt_Velocity;
+	ref_rt						rt_ui_pda;
+
+	ref_rt						rt_ui_depth;
+	ref_rt						rt_ui_color;
+
+	ref_rt						rt_planar_depth;
+
+	// Editor mode: scene depth of the viewport size, replaces the window depth (RDepth)
+	ref_rt						rt_EditorDepth;
+	IRHIDepthStencilView*		EditorWindowDepth = nullptr;
+	ref_rt						rt_EditorOverlayDepth;
+
+	ref_rt						rt_planar_color;
+
+	ref_rt						rt_upscaled_depth;
+	ref_rt						rt_upscaled_depth_old;
+
+	ref_rtc						rt_Reflection;
+	ref_rtc						rt_Reflection_temp;
+	ref_rt						rt_Reflection_forward;
+	ref_rt						rt_Depth;
+
+	IRHISurface*				rt_smap_depth_sun_tex;
+	IRHIDepthStencilView*		rt_smap_depth_sun_dsv[3];
+	ref_texture					rt_smap_depth_sun;
+
+	// 
+	ref_rt						rt_Accumulator;		// 64bit		(r,g,b,specular)
+
+	ref_rt						rt_Forward;
+	ref_rt						rt_Revealage;
+
+	ref_rt						rt_Generic_0;		// 32bit		(r,g,b,a)				// post-process, intermidiate results, etc.
+	ref_rt						rt_Generic_1;		// 32bit		(r,g,b,a)				// post-process, intermidiate results, etc.
+	//	Igor: for volumetric lights
+	ref_rt						rt_Generic_2;		// 32bit		(r,g,b,a)				// post-process, intermidiate results, etc.
+	ref_rt						rt_BackbufferLUT;		// 32bit		(r,g,b,a)				// post-process, intermidiate results, etc.
+
+	ref_rt						rt_Bloom_A;			// 32bit, dim		(r,g,b,?)
+	ref_rt						rt_Bloom_B;			// 32bit, dim/2		(r,g,b,?)
+	ref_rt						rt_Bloom_C;			// 32bit, dim/4		(r,g,b,?)
+	ref_rt						rt_Bloom_D;			// 32bit, dim/8		(r,g,b,?)
+	ref_rt						rt_Bloom_E;			// 32bit, dim/16	(r,g,b,?)
+	ref_rt						rt_Bloom_F;			// 32bit, dim/32	(r,g,b,?)
+	ref_rt						rt_Bloom_G;			// 32bit, dim/64
+	ref_rt						rt_Bloom_A2;			// 32bit, dim		(r,g,b,?)
+	ref_rt						rt_Bloom_B2;			// 32bit, dim/2		(r,g,b,?)
+	ref_rt						rt_Bloom_C2;			// 32bit, dim/4		(r,g,b,?)
+	ref_rt						rt_Bloom_D2;			// 32bit, dim/8		(r,g,b,?)
+	ref_rt						rt_Bloom_E2;			// 32bit, dim/16	(r,g,b,?)
+	ref_rt						rt_Bloom_F2;			// 32bit, dim/32	(r,g,b,?)
+
+	ref_rt						rt_LUM_A;			// 32bit, 1024x1024,log-average in all components
+	ref_rt						rt_LUM_B;			// 32bit, 128x128,	log-average in all components
+	ref_rt						rt_LUM_C;			// 32bit, 16x16,	log-average in all components
+	ref_rt						rt_LUM_D;			// 64bit, 1x1,		log-average in all components
+	//==================================================
+
+	//============== new Depth of Field ==============
+	ref_rt						rt_dof_focus;			// 24bit, 1x1,		current focus distance
+	ref_rt						rt_dof_focus_prev;		// 24bit, 1x1,		prev frame focus distance
+	ref_rt						rt_dof_coc;				// 16bit, dim,		circle of confusion
+	ref_rt						rt_dof_coc_prev;		// 16bit, dim,		circle of confusion
+	ref_rt						rt_dof_blur1;			// 32bit, dim,		blur pass1
+	ref_rt						rt_dof_blur2;			// 32bit, dim,		blur pass2
+	ref_rt						rt_dof_blur3;			// 32bit, dim,		blur pass3
+
+	// env
+	ref_texture				t_envmap_0		;	// env-0
+	ref_texture				t_envmap_1		;	// env-1
+
+	//GTAO
+	ref_rt						rt_gtao_0;
+
+	//TAA
+	ref_rt					rt_Generic_0_prev; //previous frame for taa
+
+	// smap
+	ref_rt						rt_smap_surf;	// 32bit,		color
+	ref_rt						rt_smap_depth;	// 24(32) bit,	depth 
+//	TODO: DX10: CHeck if we need old-style SMAP
+//	IDirect3DSurface9*			rt_smap_ZB;		//
+
+	//	Igor: for async screenshots
+	ID3DTexture2D*			t_ss_async;				//32bit		(r,g,b,a) is situated in the system memory
+
+	// Textures
+	ID3DTexture3D*			t_material_surf;
+	ref_texture					t_material;
+
+	IRHISurface*			t_noise_surf	[TEX_jitter_count];
+	ref_texture					t_noise				[TEX_jitter_count];
+
+	ref_shader					s_sslr;
+private:
+
+	ref_shader					s_spp;
+	ref_shader					s_gasmask;
+	ref_shader					s_fxaa;
+	ref_shader					s_smaa;
+	ref_shader					s_scale;
+	ref_shader					s_cas;
+	ref_shader					s_gtao;
+	ref_shader					s_puddles;
+	ref_shader					s_taa;
+	ref_shader					s_nvg;
+
+	// For gamma correction in windowed mode
+	ref_shader					s_gamma;
+
+	// OCCq
+	ref_shader					s_occq;
+
+	// SMAA
+	ref_rt						rt_smaa_edgetex;
+	ref_rt						rt_smaa_blendtex;
+
+	// SSAO
+	ref_rt						rt_ssao_temp;
+	ref_rt						rt_half_depth;
+	ref_shader					s_ssao;
+	ref_shader					s_hdao_cs;
+
+	// Accum
+	ref_shader					s_accum_mask	;
+	ref_shader					s_accum_direct	;
+	ref_shader					s_accum_direct_volumetric;
+	ref_shader					s_accum_point	;
+	ref_shader					s_accum_spot	;
+	ref_shader					s_accum_reflected;
+	ref_shader					s_accum_volume;
+
+	//	DX10 Rain
+	ref_shader					s_rain;
+	ref_geom						g_accum_point	;
+	ref_geom						g_accum_spot	;
+	ref_geom						g_accum_omnipart;
+	ref_geom						g_accum_volumetric;
+
+	IRHIBuffer*		g_accum_point_vb;
+	IRHIBuffer*		g_accum_point_ib;
+
+	IRHIBuffer*		g_accum_omnip_vb;
+	IRHIBuffer*		g_accum_omnip_ib;
+
+	IRHIBuffer*		g_accum_spot_vb	;
+	IRHIBuffer*		g_accum_spot_ib	;
+
+	IRHIBuffer*		g_accum_volumetric_vb;
+	IRHIBuffer*		g_accum_volumetric_ib;
+
+	ID3DBlendState*			g_debug_blend_state = nullptr;
+
+	float							f_bloom_factor;
+
+	// Luminance
+	ref_shader			s_luminance;
+	float						f_luminance_adapt;
+
+	//================= new bloom and lum =================
+	ref_shader					s_bloom_downsample;
+	ref_shader					s_bloom_upsample;
+	ref_shader					s_lum_copy;
+	ref_shader					s_lum_downsample;
+	ref_shader					s_lum_calc;
+	//=====================================================
+
+	//============== new Depth of Field ==============
+	ref_shader					s_dof_focus;
+	ref_shader					s_dof_coc;
+	ref_shader					s_dof_blur1;
+	ref_shader					s_dof_blur2;
+	ref_shader					s_dof_blur3;
+	
+
+	// FX: ScreenQuad
+	IRHIBuffer* FSTriangleVB = nullptr;
+	IRHIBuffer* FSTriangleIB = nullptr;
+
+	// Combine
+	ref_geom					g_combine;
+	ref_geom					g_combine_VP;		// xy=p,zw=tc
+	ref_geom					g_combine_2UV;
+	ref_geom					g_combine_cuboid;
+	ref_geom					g_aa_AA;
+	ref_shader				s_combine_volumetric;
+public:
+	ref_shader				s_combine;
+	ref_geom				FSTriangleGeom;
+	ref_shader				s_postprocess;
+	ref_geom					g_postprocess;
+	ref_shader				s_menu;
+	ref_geom					g_menu;
+private:
+	float						im_noise_time;
+	u32							im_noise_shift_w;
+	u32							im_noise_shift_h;
+	
+	float						param_blur;
+	float						param_gray;
+	float						param_duality_h;
+	float						param_duality_v;
+	float						param_noise;
+	float						param_noise_scale;
+	float						param_noise_fps;
+	u32							param_color_base;
+	u32							param_color_gray;
+	Fvector						param_color_add;
+
+	//	Color mapping
+	float						param_color_map_influence;
+	float						param_color_map_interpolate;
+	ColorMapManager				color_map_manager;
+
+	//	Igor: used for volumetric lights
+	bool						m_bHasActiveVolumetric;
+public:
+								CRenderTarget			();
+								void CreateFSTriangle();
+								~CRenderTarget			();
+	void						accum_point_geom_create	();
+	void						accum_point_geom_destroy();
+	void						accum_omnip_geom_create	();
+	void						accum_omnip_geom_destroy();
+	void						accum_spot_geom_create	();
+	void						accum_spot_geom_destroy	();
+	//	Igor: used for volumetric lights
+	void						accum_volumetric_geom_create();
+	void						accum_volumetric_geom_destroy();
+
+	void						u_stencil_optimize		(eStencilOptimizeMode eSOM = SO_Light);
+	void						u_compute_texgen_screen	(Fmatrix&	dest);
+	void						u_compute_texgen_jitter	(Fmatrix&	dest);
+	void						u_setrt					(const ref_rt& _1, const ref_rt& _2, const ref_rt& _3, const ref_rt& _4, IRHIDepthStencilView* zb);
+	void						u_setrt					(const ref_rt& _1, const ref_rt& _2, const ref_rt& _3, IRHIDepthStencilView* zb);
+	void						u_setrt					(const ref_rt& _1, const ref_rt& _2, IRHIDepthStencilView* zb);
+	void						u_setrt					(u32 W, u32 H, IRHIRenderTargetView* _1, IRHIRenderTargetView* _2, IRHIRenderTargetView* _3, IRHIDepthStencilView* zb);
+	void						u_setrt					(u32 W, u32 H, IRHIRenderTargetView* _1, IRHIRenderTargetView* _2, IRHIRenderTargetView* _3, IRHIRenderTargetView* _4, IRHIDepthStencilView* zb);
+	void						u_calc_tc_noise			(Fvector2& p0, Fvector2& p1);
+	void						u_calc_tc_duality_ss	(Fvector2& r0, Fvector2& r1, Fvector2& l0, Fvector2& l1);
+	bool						u_need_PP				();
+	bool						u_need_CM				();
+	bool						u_DBT_enable			(float zMin, float zMax);
+	void						u_DBT_disable			();
+
+	void						init_fsr				();
+	bool						phase_fsr				();
+	void						init_xess();
+	bool						phase_xess();
+	void						init_dlss();
+	bool						phase_dlss();
+	void						phase_scale				();
+	void						PhaseEditorScale		();
+
+	void						copy_position			();
+
+	void						phase_fxaa				();
+	void						phase_smaa				();
+	void						phase_taa				();
+	void						phase_mblur				();
+	void						phase_depth_upscale		();
+
+	void						phase_cas				();
+	void						phase_ui_postprocess	(Fcolor*, bool HasBackground);
+	void						phase_ui_postprocess_copy();
+
+	void						phase_gtao				();
+	void						phase_sslr				();
+	void						pharse_velocity			();
+
+	void						phase_nvg				();
+
+	bool						phase_puddles			();
+	void						phase_planar			();
+
+	void						RenderEffect			(ScreenPostProcessType postProcessType, bool = true);
+	void						PhaseAberration			();
+	void						PhaseRaindrops();
+	void PhaseBodycam();
+	void						PhaseGasmask			();
+	void						PhaseWinter				();
+
+	void						phase_scene_forward		();
+	void						phase_scene_prepare		();
+
+	void						phase_scene_begin		();
+	void						phase_scene_end			();
+	void						phase_occq				();
+	void						phase_ssao				();
+	void						phase_downsamp			();
+	void						phase_wallmarks			();
+	void						phase_smap_direct		(light* L,	u32 sub_phase);
+	void						phase_smap_direct_tsh	(light* L,	u32 sub_phase);
+	void						phase_smap_spot_clear	();
+	void						phase_smap_spot			(light* L);
+	void						phase_smap_spot_tsh		(light* L);
+	void						phase_accumulator		();
+	void						phase_vol_accumulator	();
+	void						shadow_direct			(light* L, u32 dls_phase);
+
+	void						phase_rain				();
+	void						draw_rain				(light &RainSetup);
+
+	bool						need_to_render_sunshafts();
+
+	bool						enable_scissor			(light* L);		// true if intersects near plane
+	void						enable_dbt_bounds		(light* L);
+
+	void						disable_aniso			();
+
+	void						draw_volume				(light* L);
+	void						accum_direct_cascade	();
+	void						accum_direct_volumetric	();
+	void						accum_point				(light* L);
+	void						accum_spot				(light* L);
+	void						accum_reflected			(light* L);
+	//	Igor: for volumetric lights
+	void						accum_volumetric		(light* L);
+	void						accum_volumetric_lv		(light* L);
+
+	void						phase_bloom				();
+	void						phase_luminance			();
+	void						phase_combine			();
+	void						phase_combine_volumetric();
+	void						phase_pp				();
+	//==========================================================
+	void						phase_bloom_downsample();
+	void						phase_bloom_upsample();
+	void						phase_new_luminance();
+	void						phase_new_dof();
+	//==========================================================
+
+
+	virtual void				set_blur				(float	f)		{ param_blur=f;						}
+	virtual void				set_gray				(float	f)		{ param_gray=f;						}
+	virtual void				set_duality_h			(float	f)		{ param_duality_h=std::abs(f);			}
+	virtual void				set_duality_v			(float	f)		{ param_duality_v=std::abs(f);			}
+	virtual void				set_noise				(float	f)		{ param_noise=f;					}
+	virtual void				set_noise_scale			(float	f)		{ param_noise_scale=f;				}
+	virtual void				set_noise_fps			(float	f)		{ param_noise_fps= std::abs(f)+EPS_S;	}
+	virtual void				set_color_base			(u32	f)		{ param_color_base=f;				}
+	virtual void				set_color_gray			(u32	f)		{ param_color_gray=f;				}
+	virtual void				set_color_add			(const Fvector	&f)		{ param_color_add=f;		}
+
+	virtual u32					get_width				();
+	virtual u32					get_height				();
+	virtual u32					get_target_width		();
+	virtual u32					get_target_height		();
+	virtual u32					get_core_width			();
+	virtual u32					get_core_height			();
+
+	virtual void				set_cm_imfluence	(float	f)		{ param_color_map_influence = f;							}
+	virtual void				set_cm_interpolate	(float	f)		{ param_color_map_interpolate = f;							}
+	virtual void				set_cm_textures		(const shared_str &tex0, const shared_str &tex1) {color_map_manager.SetTextures(tex0, tex1);}
+
+	//	Need to reset stencil only when marker overflows.
+	//	Don't clear when render for the first time
+	void						reset_light_marker( bool bResetStencil = false);
+	void						increment_light_marker();
+
+	void						DoAsyncScreenshot		();
+	// Resolves the LDR frame into Destination (the swapchain target when null)
+	void						PhaseGammaApply			(IRHIRenderTargetView* Destination = nullptr);
+
+#ifdef DEBUG
+	IC void						dbg_addline				(Fvector& P0, Fvector& P1, u32 c)					{
+		dbg_lines.push_back		(dbg_line_t());
+		dbg_lines.back().P0		= P0;
+		dbg_lines.back().P1		= P1;
+		dbg_lines.back().color	= c;
+	}
+	IC void						dbg_addplane			(Fplane& P0,  u32 c)								{
+		dbg_planes.push_back(P0);
+	}
+#else
+	IC void						dbg_addline				(Fvector& P0, Fvector& P1, u32 c)					{}
+	IC void						dbg_addplane			(Fplane& P0,  u32 c)								{}
+#endif
+};

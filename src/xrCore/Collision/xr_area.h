@@ -1,0 +1,62 @@
+#pragma once
+#include "xr_collide_defs.h"
+#include "../FormatParsers/LevelCForm/CFormIO.h"
+
+// refs
+class ISpatial;
+using ISpatialShared = xr_shared_ptr<ISpatial>;
+
+class 	ICollisionForm;
+class 	CObject;
+
+#include "../../Include/xrRender/FactoryPtr.h"
+#include "../../Include/xrRender/ObjectSpaceRender.h"
+#include "xrCDB.h"
+
+//-----------------------------------------------------------------------------------------------------------
+//Space Area
+//-----------------------------------------------------------------------------------------------------------
+//struct hdrCFORM;
+class	XRCORE_API						CObjectSpace
+{
+private:
+	// Debug
+	CDB::MODEL							Static;
+	Fbox								m_BoundingVolume;
+public:
+
+#ifdef DEBUG
+	FactoryPtr<IObjectSpaceRender>		*m_pRender;
+#endif
+
+public:
+										CObjectSpace		( );
+										~CObjectSpace		( );
+
+	void								Load				(  CDB::build_callback build_callback  );
+	void								Load				(  const char* initial, const char* fname, CDB::build_callback build_callback, bool NotFromLevel = false);
+	//void								Load				(  IReader* R, CDB::build_callback build_callback  );
+	//void								Create				(  Fvector*	verts, CDB::TRI* tris, const hdrCFORM &H, CDB::build_callback build_callback, void* pRW, bool RWMode);
+	void								Create				(  const XRay::CForm::IFormat& Data, CDB::build_callback build_callback, void* pRW, bool RWMode);
+	
+	// Occluded/No
+	bool								RayTest				( const Fvector &start, const Fvector &dir, float range, collide::rq_target tgt, collide::ray_cache* cache, CObject* ignore_object);
+
+	// Game raypick (nearest) - returns object and addititional params
+	bool								RayPick				( const Fvector &start, const Fvector &dir, float range, collide::rq_target tgt, collide::rq_result& R, CObject* ignore_object );
+
+	// General collision query
+	bool								RayQuery			( collide::rq_results& dest, const collide::ray_defs& rq, collide::rq_callback* cb, LPVOID user_data, collide::test_callback* tb, CObject* ignore_object);
+	bool								RayQuery			( collide::rq_results& dest, ICollisionForm* target, const collide::ray_defs& rq);
+
+	ICF xr_vector<CDB::TRI>&			GetStaticTris		() { return Static.get_tris();	}
+	ICF xr_vector<Fvector>&				GetStaticVerts		() { return Static.get_verts(); }
+	ICF CDB::MODEL*						GetStaticModel		() { return &Static;			}
+
+	ICF const Fbox&						GetBoundingVolume	() { return m_BoundingVolume;}
+
+	// Debugging
+#ifdef DEBUG
+	void								dbgRender			();
+#endif
+};

@@ -1,0 +1,492 @@
+#include "StdAfx.h"
+#include "Torch.h"
+#include "Actor.h"
+#include "../xrEngine/LightAnimLibrary.h"
+#include "../xrEngine/CameraBase.h"
+#include "../xrEngine/xr_collide_form.h"
+#include "Inventory.h"
+
+static constexpr float TORCH_INERTION_SPEED_MAX = 7.5f;
+static constexpr float TORCH_INERTION_SPEED_MIN = 0.5f;
+static Fvector TORCH_OFFSET = { -0.2f,+0.1f,-0.3f };
+static constexpr Fvector OMNI_OFFSET = { -0.2f,+0.1f,-0.1f };
+static constexpr float OPTIMIZATION_DISTANCE = 100.0f;
+
+static bool stalker_use_dynamic_lights = false;
+
+ENGINE_API int g_current_renderer;
+
+CTorch::CTorch()
+{
+	light_render = ::Render->light_create();
+	light_render->set_type(IRender_Light::SPOT);
+	light_render->set_shadow(true);
+	light_omni = ::Render->light_create();
+	light_omni->set_type(IRender_Light::POINT);
+	light_omni->set_shadow(!!psDeviceFlags.test(rsR4));
+
+	glow_render = ::Render->glow_create();
+
+	m_prev_hp.set(0.0f, 0.0f);
+
+	// Disabling shift by x and z axes for 1st render, 
+	// because we don't have dynamic lighting in it. 
+	if (g_current_renderer == 1)
+	{
+		TORCH_OFFSET.x = 0.0f;
+		TORCH_OFFSET.z = 0.0f;
+	}
+}
+
+CTorch::~CTorch()
+{
+	light_render.destroy();
+	light_omni.destroy();
+	glow_render.destroy();
+}
+
+void CTorch::OnMoveToSlot(const SInvItemPlace& prev)
+{
+	CInventoryOwner* owner = H_Parent() ? H_Parent()->cast_inventory_owner() : nullptr;
+	if (owner && !owner->attached(this))
+	{
+		owner->attach(this->cast_inventory_item());
+	}
+}
+
+void CTorch::OnMoveToRuck(const SInvItemPlace& prev)
+{
+	if (prev.type == eItemPlaceSlot)
+	{
+		Switch(false);
+	}
+}
+
+inline bool CTorch::can_use_dynamic_lights()
+{
+	if (H_Parent() == nullptr)
+	{
+		return true;
+	}
+
+	CInventoryOwner* owner = H_Parent()->cast_inventory_owner();
+	if (!owner)
+	{
+		return true;
+	}
+
+	return owner->can_use_dynamic_lights();
+}
+
+void CTorch::Load(const char* section)
+{
+	inherited::Load(section);
+	light_trace_bone = pSettings->r_string(section, "light_trace_bone");
+
+	if (pSettings->line_exist(section, "sound_activate"))
+	{
+		m_sounds.LoadSound(section, "sound_activate", "soundActivate", false, SOUND_TYPE_ITEM_USING);
+	}
+
+	if (pSettings->line_exist(section, "sound_deactivate"))
+	{
+		m_sounds.LoadSound(section, "sound_deactivate", "soundDeactivate", false, SOUND_TYPE_ITEM_USING);
+	}
+
+	IPowerManager::SetSelfObject(cast_inventory_item(), H_Parent());
+	IPowerManager::Load(section, cast_inventory_item()); // FFx0001 ++
+}
+
+void CTorch::Switch()
+{
+	if (OnClient())
+	{
+		return;
+	}
+
+	bool bActive = !m_switched_on;
+	Switch(bActive);
+
+	if (CActor* pA = H_Parent() != nullptr ? H_Parent()->cast_actor() : nullptr)
+	{
+		if (!m_switched_on)
+		{
+			if (m_sounds.FindSoundItem("soundActivate", false))
+			{
+				m_sounds.PlaySound("soundActivate", pA->Position(), pA, !!pA->HUDview());
+			}
+		}
+		else if (m_switched_on)
+		{
+			if (m_sounds.FindSoundItem("soundDeactivate", false))
+			{
+				m_sounds.PlaySound("soundDeactivate", pA->Position(), pA, !!pA->HUDview());
+			}
+		}
+	}
+}
+
+void CTorch::Switch(bool light_on)
+{
+	m_switched_on = light_on;
+
+	if (can_use_dynamic_lights())
+	{
+		light_render->set_active(light_on);
+		light_omni->set_decor_object(H_Parent());
+		light_omni->set_active(light_on);
+	}
+
+	glow_render->set_active(light_on);
+
+	if (*light_trace_bone)
+	{
+		IKinematics* pVisual = PKinematics(Visual());
+		VERIFY(pVisual);
+		u16 bi = pVisual->LL_BoneID(light_trace_bone);
+
+		pVisual->LL_SetBoneVisible(bi, light_on, true);
+		pVisual->CalculateBones(true);
+	}
+}
+bool CTorch::torch_active() const
+{
+	return (m_switched_on);
+}
+
+bool CTorch::net_Spawn(CSE_Abstract* DC)
+{
+	CSE_Abstract* e = (CSE_Abstract*)(DC);
+	CSE_ALifeItemTorch* torch = smart_cast<CSE_ALifeItemTorch*>(e);
+	R_ASSERT(torch);
+	cNameVisual_set(torch->get_visual());
+
+	R_ASSERT(!CFORM());
+	R_ASSERT(PKinematics(Visual()));
+	collidable.model = new CCF_Skeleton(this);
+
+	if (!inherited::net_Spawn(DC))
+	{
+		return false;
+	}
+
+	bool b_r2 = !!psDeviceFlags.test(rsR2);
+	b_r2 |= !!psDeviceFlags.test(rsR4);
+
+	IKinematics* K = PKinematics(Visual());
+	CInifile* pUserData = K->LL_UserData();
+
+	if (pUserData != nullptr)
+	{
+		R_ASSERT3(pUserData, "Empty Torch user data!", torch->get_visual());
+		lanim = LALib.FindItem(pUserData->r_string("torch_definition", "color_animator"));
+		guid_bone = K->LL_BoneID(pUserData->r_string("torch_definition", "guide_bone"));	VERIFY(guid_bone != BI_NONE);
+
+		Fcolor clr = pUserData->r_fcolor("torch_definition", (b_r2) ? "color_r2" : "color");
+		fBrightness = clr.intensity();
+		float range = pUserData->r_float("torch_definition", (b_r2) ? "range_r2" : "range");
+		light_render->set_color(clr);
+		light_render->set_range(range);
+
+		Fcolor clr_o = pUserData->r_fcolor("torch_definition", (b_r2) ? "omni_color_r2" : "omni_color");
+		float range_o = pUserData->r_float("torch_definition", (b_r2) ? "omni_range_r2" : "omni_range");
+		light_omni->set_color(clr_o);
+		light_omni->set_range(range_o);
+
+		light_render->set_cone(deg2rad(pUserData->r_float("torch_definition", "spot_angle")));
+		light_render->set_texture(pUserData->r_string("torch_definition", "spot_texture"));
+
+		glow_render->set_texture(pUserData->r_string("torch_definition", "glow_texture"));
+		glow_render->set_color(clr);
+		glow_render->set_radius(pUserData->r_float("torch_definition", "glow_radius"));
+
+		//включить/выключить фонарик
+		Switch(torch->m_active);
+		VERIFY(!torch->m_active || (torch->ID_Parent != ALife::INVALID_OBJECT_ID));
+
+		m_delta_h = PI_DIV_2 - atan((range * 0.5f) / std::abs(TORCH_OFFSET.x));
+	}
+
+	return true;
+}
+
+void CTorch::net_Destroy()
+{
+	Switch(false);
+	inherited::net_Destroy();
+}
+
+void CTorch::OnH_A_Chield()
+{
+	inherited::OnH_A_Chield();
+	m_focus.set(Position());
+}
+
+void CTorch::OnH_B_Independent(bool just_before_destroy)
+{
+	inherited::OnH_B_Independent(just_before_destroy);
+	Switch(false);
+	m_sounds.StopAllSounds();
+}
+
+void CTorch::UpdateCL()
+{
+	PROF_EVENT("CTorch::UpdateCL")
+	inherited::UpdateCL();
+	
+	IPowerManager::SetEnabled(m_switched_on);
+
+	if (!m_switched_on)
+	{
+		return;
+	}
+
+	if (IPowerManager::IsAllow() && IPowerManager::GetLeftPowerValue() <= 0)
+	{
+		Switch();
+	}
+
+	CBoneInstance& BI = PKinematics(Visual())->LL_GetBoneInstance(guid_bone);
+	Fmatrix M;
+
+	if (H_Parent())
+	{
+		CActor* actor = H_Parent()->cast_actor();
+		if (actor)
+		{
+			PKinematics(H_Parent()->Visual())->CalculateBones_Invalidate();
+		}
+
+		if ((H_Parent()->XFORM().c.distance_to_sqr(Device.vCameraPosition) < _sqr(OPTIMIZATION_DISTANCE) || GameID() != eGameIDSingle))
+		{
+			// near camera
+			PKinematics(H_Parent()->Visual())->CalculateBones
+			(
+				!!Render->ViewBase.testSphere_dirty(H_Parent()->SpatialComponent->sphere.P,
+					H_Parent()->SpatialComponent->sphere.R + SpatialComponent->sphere.R + light_render->get_homdata().sphere.R)
+			);
+
+			M.mul_43(XFORM(), BI.mTransform);
+		}
+		else
+		{
+			// approximately the same
+			M = H_Parent()->XFORM();
+			H_Parent()->Center(M.c);
+			M.c.y += H_Parent()->Radius() * 2.0f / 3.0f;
+		}
+
+		if (actor != nullptr)
+		{
+			m_prev_hp.x = angle_inertion_var(m_prev_hp.x, -actor->cam_Active()->yaw, TORCH_INERTION_SPEED_MIN, TORCH_INERTION_SPEED_MAX, PI_DIV_6, Device.fTimeDelta);
+			m_prev_hp.y = angle_inertion_var(m_prev_hp.y, -actor->cam_Active()->pitch, TORCH_INERTION_SPEED_MIN, TORCH_INERTION_SPEED_MAX, PI_DIV_6, Device.fTimeDelta);
+			if (actor->active_cam() == eacFirstEye)
+			{
+				light_render->set_ignore_object(H_Parent());
+				light_omni->set_ignore_object(H_Parent());
+				light_omni->set_decor_object(nullptr);
+			}
+			else
+			{
+				light_render->set_ignore_object(nullptr);
+				light_omni->set_ignore_object(nullptr);
+				light_omni->set_decor_object(H_Parent());
+			}
+
+			Fvector	dir = zero_vel, right = zero_vel, up = zero_vel;
+			dir.setHP(m_prev_hp.x + m_delta_h, m_prev_hp.y);
+			Fvector::generate_orthonormal_basis_normalized(dir, up, right);
+
+			Fvector offset = M.c;
+			offset.mad(M.i, TORCH_OFFSET.x);
+			offset.mad(M.j, TORCH_OFFSET.y);
+			offset.mad(M.k, TORCH_OFFSET.z);
+			light_render->set_position(offset);
+
+			offset = M.c;
+			offset.mad(M.i, OMNI_OFFSET.x);
+			offset.mad(M.j, OMNI_OFFSET.y);
+			offset.mad(M.k, OMNI_OFFSET.z);
+			light_omni->set_position(offset);
+
+			glow_render->set_position(M.c);
+
+			if (!actor->HUDview())
+			{
+				u16 head_bone = actor->Visual()->dcast_PKinematics()->LL_BoneID("bip01_head");
+
+				CBoneInstance& BI2 = actor->Visual()->dcast_PKinematics()->LL_GetBoneInstance(head_bone);
+				Fmatrix M2;
+				M2.mul(actor->XFORM(), BI2.mTransform);
+
+				light_render->set_rotation(M2.k, M2.i);
+			}
+			else
+			{
+				light_render->set_rotation(dir, right);
+			}
+
+			light_omni->set_rotation(dir, right);
+			glow_render->set_direction(dir);
+
+		}
+		else
+		{
+			if (can_use_dynamic_lights())
+			{
+				light_render->set_position(M.c);
+				light_render->set_rotation(M.k, M.i);
+
+				Fvector offset = M.c;
+				offset.mad(M.i, OMNI_OFFSET.x);
+				offset.mad(M.j, OMNI_OFFSET.y);
+				offset.mad(M.k, OMNI_OFFSET.z);
+				light_omni->set_position(M.c);
+				light_omni->set_rotation(M.k, M.i);
+			}
+
+			glow_render->set_position(M.c);
+			glow_render->set_direction(M.k);
+		}
+	}
+	else
+	{
+		if (getVisible() && m_pPhysicsShell)
+		{
+			M.mul(XFORM(), BI.mTransform);
+
+			m_switched_on = false;
+			light_render->set_active(false);
+			light_omni->set_active(false);
+			glow_render->set_active(false);
+		}  
+	}
+
+	if (!m_switched_on)
+	{
+		return;
+	}
+
+	// calc color animator
+	if (lanim == nullptr)
+	{
+		return;
+	}
+
+	int frame = 0;
+	// возвращает в формате BGR
+	u32 clr = lanim->CalculateBGR(Device.fTimeGlobal, frame);
+
+	Fcolor fclr;
+	fclr.set((float)color_get_B(clr), (float)color_get_G(clr), (float)color_get_R(clr), 1.0f);
+	fclr.mul_rgb(fBrightness / 255.0f);
+	if (can_use_dynamic_lights())
+	{
+		light_render->set_color(fclr);
+		light_omni->set_color(fclr);
+	}
+
+	glow_render->set_color(fclr);
+}
+
+void CTorch::create_physic_shell()
+{
+	CPhysicsShellHolder::create_physic_shell();
+}
+
+void CTorch::activate_physic_shell()
+{
+	CPhysicsShellHolder::activate_physic_shell();
+}
+
+void CTorch::setup_physic_shell()
+{
+	CPhysicsShellHolder::setup_physic_shell();
+}
+
+void CTorch::net_Export(NET_Packet& P)
+{
+	inherited::net_Export(P);
+
+	BYTE F = 0;
+	F |= (m_switched_on ? eTorchActive : 0);
+	const CActor* pA = H_Parent() ? H_Parent()->cast_actor() : nullptr;
+	if (pA)
+	{
+		if (pA->attached(this))
+		{
+			F |= eAttached;
+		}
+	}
+
+	P.w_u8(F);
+}
+
+void CTorch::net_Import(NET_Packet& P)
+{
+	inherited::net_Import(P);
+
+	BYTE F = P.r_u8();
+	bool new_m_switched_on = !!(F & eTorchActive);
+
+	if (new_m_switched_on != m_switched_on)
+	{
+		Switch(new_m_switched_on);
+	}
+}
+
+bool CTorch::can_be_attached() const
+{
+	CObject* h_parent = const_cast<CObject*>(H_Parent());
+	if (const CActor* pA = h_parent != nullptr ? h_parent->cast_actor() : nullptr)
+	{
+		return pA->inventory().InSlot(this);
+	}
+
+	return true;
+}
+
+void CTorch::afterDetach()
+{
+	inherited::afterDetach();
+	Switch(false);
+}
+
+void CTorch::renderable_Render()
+{
+	if (IsGameTypeSingle())
+	{
+		inherited::renderable_Render();
+	}
+	else
+	{
+		CActor* pActor = H_Parent() != nullptr ? H_Parent()->cast_actor() : nullptr;
+		if (m_switched_on && pActor != nullptr)
+		{
+			inherited::renderable_Render();
+		}
+	}
+}
+
+void CTorch::enable(bool value)
+{
+	inherited::enable(value);
+
+	if (!enabled() && m_switched_on)
+	{
+		Switch(false);
+	}
+
+}
+
+void CTorch::save(NET_Packet& output_packet)
+{
+	inherited::save(output_packet);
+	IPowerManager::net_save(output_packet);
+}
+
+void CTorch::load(IReader& input_packet)
+{
+	inherited::load(input_packet);
+	IPowerManager::net_load(input_packet);
+}

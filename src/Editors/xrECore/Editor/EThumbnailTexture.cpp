@@ -1,0 +1,243 @@
+#include "stdafx.h"
+
+#include "EThumbnail.h"
+#include "ImageManager.h"
+
+#define THM_TEXTURE_VERSION 0x0012
+
+ETextureThumbnail::ETextureThumbnail(const char* src_name, bool bLoad)
+	: EImageThumbnail(src_name, ETTexture)
+{
+	if (!strchr(src_name, '\\'))
+	{
+		xr_string _name = src_name;
+		ImageLib.UpdateFileName(_name);
+		m_Name = _name.c_str();
+		m_Name = ChangeFileExt(m_Name, ".thm");
+	}
+	m_bValid = false;
+
+	if (bLoad && !Load())
+	{
+		ImageLib.CreateTextureThumbnail(this, src_name);
+	}
+}
+//------------------------------------------------------------------------------
+
+ETextureThumbnail::~ETextureThumbnail()
+{
+	m_Pixels.clear();
+}
+//------------------------------------------------------------------------------
+
+int ETextureThumbnail::MemoryUsage()
+{
+	int mem_usage = _Width() * _Height() * 4;
+
+    switch (m_TexParams.fmt)
+	{
+		case STextureParams::tfDXT1:
+		case STextureParams::tfADXT1: 	mem_usage/=6; break;
+		case STextureParams::tfDXT3:
+		case STextureParams::tfDXT5: 	mem_usage/=4; break;
+		case STextureParams::tf4444:
+		case STextureParams::tf1555:
+		case STextureParams::tf565: 	mem_usage/=2; break;
+		case STextureParams::tfRGBA:	break;
+    }
+
+    string_path fn;
+    FS.update_path	(fn,_game_textures_,EFS.ChangeFileExt(m_Name.c_str(),".seq").c_str());
+	if (FS.exist(fn))
+	{
+		string128 buffer;
+		IReader* F = FS.r_open(nullptr, fn);
+		F->r_string(buffer, sizeof(buffer));
+		int cnt = 0;
+
+		while (!F->eof())
+		{
+			F->r_string(buffer, sizeof(buffer));
+			cnt++;
+		}
+
+		FS.r_close(F);
+		mem_usage *= cnt ? cnt : 1;
+	}
+    return mem_usage;
+}
+
+void ETextureThumbnail::CreateFromData(u32* p, u32 w, u32 h)
+{
+	EImageThumbnail::CreatePixels(p, w, h);
+    m_TexParams.width = w;
+    m_TexParams.height= h;
+    m_TexParams.flags.set(STextureParams::flHasAlpha,false);
+}
+
+bool ETextureThumbnail::Load(const char* src_name, const char* path)
+{
+	string_path fn;
+	strcpy(fn, EFS.ChangeFileExt(src_name ? src_name : m_Name.c_str(), ".thm").c_str());
+
+	if (path && xr_strlen(path))
+	{
+		FS.update_path(fn, path, fn);
+	}
+	else if (path == nullptr)
+	{
+		FS.update_path(fn, _game_textures_, fn);
+	}
+
+	if (!FS.TryLoad(fn))
+	{
+		return false;
+	}
+
+	IReader* F = FS.r_open(fn);
+	u16 version = 0;
+
+	R_ASSERT(F->r_chunk(THM_CHUNK_VERSION, &version));
+	if (version != THM_TEXTURE_VERSION)
+	{
+		Msg("!Thumbnail: Unsupported version.");
+		return false;
+	}
+
+	R_ASSERT(F->find_chunk(THM_CHUNK_TYPE));
+	m_Type = THMType(F->r_u32());
+	R_ASSERT(m_Type == ETTexture);
+
+	m_TexParams.Load(*F);
+	m_Age = FS.get_file_age(fn);
+
+	FS.r_close(F);
+	SetValid();
+	return true;
+}
+
+void ETextureThumbnail::Save(int age, const char* path)
+{
+	if (!Valid())
+	{
+		return;
+	}
+
+	CMemoryWriter F;
+	F.open_chunk(THM_CHUNK_VERSION);
+	F.w_u16(THM_TEXTURE_VERSION);
+	F.close_chunk();
+
+	F.open_chunk(THM_CHUNK_TYPE);
+	F.w_u32(m_Type);
+	F.close_chunk();
+
+	m_TexParams.Save(F);
+
+	string_path fn;
+	if (path && xr_strlen(path))
+	{
+		FS.update_path(fn, path, m_Name.c_str());
+	}
+	else if (path == nullptr)
+	{
+		FS.update_path(fn, _game_textures_, m_Name.c_str());
+	}
+	else
+	{
+		xr_strcpy(fn, m_Name.c_str());
+	}
+
+	if (F.save_to(fn))
+	{
+		FS.set_file_age(fn, age ? age : m_Age);
+	}
+	else
+	{
+		Log("!Can't save thumbnail:", fn);
+	}
+}
+
+void ETextureThumbnail::FillProp(PropItemVec& items, PropValue::TOnChange on_type_change)
+{
+	m_TexParams.FillProp		(m_SrcName.c_str(),items,on_type_change);
+}
+//------------------------------------------------------------------------------
+
+extern ENGINE_API xr_token ttype_token[];
+extern ECORE_API bool LoadRawImage(const char* full_name, U32Vec& data, u32& w, u32& h, u32& a);
+
+void ETextureThumbnail::FillInfo(PropItemVec& items)
+{                                                                         
+	STextureParams& F			= m_TexParams;
+    PHelper().CreateCaption		(items, "Format",					get_token_name(tfmt_token,F.fmt));
+    PHelper().CreateCaption		(items, "Type",						get_token_name(ttype_token,F.type));
+    PHelper().CreateCaption		(items, "Width",					shared_str().printf("%d",_Width()));
+    PHelper().CreateCaption		(items, "Height",					shared_str().printf("%d",_Height()));
+    PHelper().CreateCaption		(items, "Alpha",					_Alpha()?"on":"off");
+}
+
+void ETextureThumbnail::Update(IRHISurface*& Texture)
+{
+	VERIFY(!Texture);
+	if (0 == m_Pixels.size())
+	{
+		u32 image_w, image_h, image_a;
+		xr_string fn_img = EFS.ChangeFileExt(m_Name.c_str(), ".tga");
+		string_path fn;
+		FS.update_path(fn, _textures_, fn_img.c_str());
+
+		if (!FS.exist(fn))
+		{
+			fn_img = EFS.ChangeFileExt(m_Name.c_str(), ".dds");
+			FS.update_path(fn, _game_textures_, fn_img.c_str());
+
+			if (!FS.exist(fn))
+			{
+				ELog.Msg(mtError, "Can't make preview for texture '%s'.", m_Name.c_str());
+				return;
+			}
+		}
+
+		U32Vec data;
+		u32 w, h, a;
+		if (!LoadRawImage(fn, data, image_w, image_h, image_a))
+		{
+			fn_img = EFS.ChangeFileExt(m_Name.c_str(), ".dds");
+			u32 mem = 0;
+
+			auto* baseTexture = ::RImplementation.texture_load(fn_img.c_str(), mem);
+			if (baseTexture)
+			{
+				Texture = GRHI->CreateTextureFromMemory(baseTexture, 0, {});
+			}
+
+			if (!Texture)
+			{
+				ELog.Msg(mtError, "Can't make preview for texture '%s'.", m_Name.c_str());
+			}
+
+			return;
+		}
+
+		if (!data.empty())
+		{
+			ImageLib.MakeThumbnailImage(this, data.data(), image_w, image_h, image_a);
+		}
+	}
+
+	if (Valid() || HasPreview)
+	{
+		inherited::Update(Texture);
+	}
+}
+
+bool ETextureThumbnail::similar(ETextureThumbnail* thm1, xr_vector<xr_string>& sel_params)
+{
+	return m_TexParams.similar(thm1->m_TexParams, sel_params);
+}
+
+const char* ETextureThumbnail::FormatString()
+{
+    return m_TexParams.FormatString();
+}

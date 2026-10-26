@@ -1,0 +1,104 @@
+#pragma once
+
+//UI-controls
+class CUIStatic;
+class CUIEditBox;
+class CUIDialogWnd;
+class CUIFrameWindow;
+class CUIFrameLineWnd;
+class CUIProgressBar;
+class CUITabControl;
+class CUIListBox;
+
+template <typename T>
+struct CWrapperBase : public T, public luabind::wrap_base {
+	typedef T inherited;
+	typedef CWrapperBase<T>	self_type;
+
+	virtual bool OnKeyboardAction(int dik, EUIMessages keyboard_action)
+	{ return call_member<bool>(this,"OnKeyboard", dik, keyboard_action);}
+	static bool OnKeyboard_static(inherited* ptr, int dik, EUIMessages keyboard_action)
+	{ 
+		return ptr->self_type::inherited::OnKeyboardAction(dik,keyboard_action );
+	}
+
+	virtual bool OnKeyboardHold(int dik)
+	{
+		return call_member<bool>(this, "OnKeyboardHold", dik);
+	}
+	static bool OnKeyboardHold_static(inherited* ptr, int dik)
+	{
+		return ptr->self_type::inherited::OnKeyboardHold(dik);
+	}
+
+	virtual bool OnGamepadKeyAction(int key, EUIMessages gamepad_action)
+	{
+		return call_member<bool>(this, "OnGamepadKey", key, gamepad_action);
+	}
+	static bool OnGamepadKey_static(inherited* ptr, int key, EUIMessages gamepad_action)
+	{
+		return ptr->self_type::inherited::OnGamepadKeyAction(key, gamepad_action);
+	}
+
+	virtual bool OnGamepadKeyHold(int key)
+	{
+		return call_member<bool>(this, "OnGamepadKeyHold", key);
+	}
+	static bool OnGamepadKeyHold_static(inherited* ptr, int key)
+	{
+		return ptr->self_type::inherited::OnGamepadKeyHold(key);
+	}
+
+	virtual bool OnGamepadStickAction(int key, Fvector2 value, EUIMessages gamepad_action)
+	{
+		return call_member<bool>(this, "OnGamepadStick", key, value, gamepad_action);
+	}
+	static bool OnGamepadStick_static(inherited* ptr, int key, Fvector2 value, EUIMessages gamepad_action)
+	{
+		return ptr->self_type::inherited::OnGamepadStickAction(key, value, gamepad_action);
+	}
+
+	virtual bool OnGyroscopeAction(Fvector3 value)
+	{
+		return call_member<bool>(this, "OnGyroscope", value);
+	}
+	static bool OnGyroscope_static(inherited* ptr, Fvector3 value)
+	{
+		return ptr->self_type::inherited::OnGyroscopeAction(value);
+	}
+
+	virtual bool OnTouchpadAction(Fvector2 value)
+	{
+		return call_member<bool>(this, "OnTouchpad", value);
+	}
+	static bool OnTouchpad_static(inherited* ptr, Fvector2 value)
+	{
+		return ptr->self_type::inherited::OnTouchpadAction(value);
+	}
+
+	virtual void Update()
+	{ call_member<void>(this,"Update");}
+	static void Update_static(inherited* ptr)
+	{ ptr->self_type::inherited::Update();}
+
+	virtual bool Dispatch(int cmd, int param)
+	{ return call_member<bool>(this,"Dispatch", cmd, param);}
+	static bool Dispatch_static(inherited* ptr, int cmd, int param)
+	{ return ptr->self_type::inherited::Dispatch(cmd,param);}
+
+};
+
+typedef CWrapperBase<CUIDialogWndEx> WrapType;
+typedef CUIDialogWndEx BaseType;
+
+template <typename T>
+T* CUIDialogWndEx::GetControl(const char* name)
+{
+	shared_str n = name;
+	CUIWindow* pWnd = FindChild(n);
+	if (pWnd == nullptr)
+		return nullptr;
+
+	return smart_cast<T*>(pWnd);
+}
+typedef luabind::class_<CUIDialogWndEx, luabind::bases<CUIDialogWnd,DLL_Pure>, WrapType> export_class;

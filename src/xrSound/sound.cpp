@@ -1,0 +1,28 @@
+#include "stdafx.h"
+#include "SoundRender_Core.h"
+
+XRSOUND_API xr_token* snd_devices_token = nullptr;
+XRSOUND_API u32 snd_device_id = 0;
+
+void CSound_manager_interface::_create(int stage)
+{
+	if (stage == 0)
+	{
+		SoundRender = new CSoundRender_Core();
+		Sound = SoundRender;
+		SoundRender->bPresent = !Core.ParamsData.test(ECoreParams::nosound);
+	}
+
+	if (!SoundRender->bPresent)
+	{
+		return;
+	}
+	Sound->_initialize(stage);
+}
+
+void CSound_manager_interface::_destroy()
+{
+	Sound->_clear();
+	xr_delete(SoundRender);
+	Sound = 0;
+}

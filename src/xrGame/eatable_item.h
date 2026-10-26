@@ -1,0 +1,93 @@
+#pragma once
+#include "inventory_item.h"
+#include "BodyHealth.h"
+#include "Descs/EatableItemDesc.h"
+#include "../xrScripts/script_export_space.h"
+
+class CPhysicItem;
+class CEntityAlive;
+
+struct CBodyTreatmentUse
+{
+	ALife::_OBJECT_ID Owner = ALife::INVALID_OBJECT_ID;
+	EBodyRegion Target = EBodyRegion::All;
+	bool Pending = false;
+	void Clear() { Owner = ALife::INVALID_OBJECT_ID; Target = EBodyRegion::All; Pending = false; }
+	void Begin(ALife::_OBJECT_ID Actor, EBodyRegion Region) { Owner = Actor; Target = Region; Pending = true; }
+	bool Commit(ALife::_OBJECT_ID Actor)
+	{
+		if (!Pending || Owner != Actor) { return false; }
+		Pending = false;
+		return true;
+	}
+};
+
+class CEatableItem : public CInventoryItem
+{
+private:
+	using inherited = CInventoryItem;
+
+protected:
+	CPhysicItem* m_physic_item = nullptr;
+
+	const SEatableItemDesc* CurrentEatableDesc = nullptr;
+
+	u8 m_iRemainingUses = 1;
+	bool m_bRemoveAfterUse = true;
+	CBodyTreatmentUse BodyTreatmentUse;
+	float m_fWeightFull = 0.0f;
+	float m_fWeightEmpty = 0.0f;
+
+public:
+	CEatableItem() = default;
+	virtual ~CEatableItem() = default;
+	virtual	DLL_Pure* _construct() override;
+
+	virtual CEatableItem* cast_eatable_item() override { return this; }
+	virtual CInventoryItem* cast_inventory_item() override { return this; }
+
+	virtual void Load(const char* section) override;
+	virtual void load(IReader& packet) override;
+	virtual void save(NET_Packet& packet) override;
+	virtual void Serialize(ISaveObject& Object) override;
+	virtual bool Useful() const override;
+
+	virtual bool net_Spawn(CSE_Abstract* DC) override;
+
+	virtual void OnH_B_Independent(bool just_before_destroy) override;
+	virtual void OnH_A_Independent() override;
+	virtual	bool UseBy(CEntityAlive* npc);
+	virtual float Weight() const override;
+
+	virtual	void Hit(SHit* pHDS) override;
+	void EatableEffects();
+	void ClearPendingUse();
+
+	bool Empty() const { return m_iRemainingUses == 0; };
+	IC bool CanDelete() const { return m_bRemoveAfterUse == 1; };
+	IC bool CanConsumeCharge() const { return EatableDesc().m_bConsumeChargeOnUse; };
+	u8 GetMaxUses() const { return EatableDesc().m_iMaxUses; };
+	const SEatableItemDesc& EatableDesc() const { VERIFY(CurrentEatableDesc); return *CurrentEatableDesc; }
+	u8 GetRemainingUses() const { return m_iRemainingUses; };
+	void SetRemainingUses(u8 value)
+	{
+		if (value <= GetMaxUses())
+		{
+			m_iRemainingUses = value;
+		}
+
+		if (IsUsingCondition())
+		{
+			if (GetMaxUses() > 0)
+			{
+				SetCondition(static_cast<float>(m_iRemainingUses) / GetMaxUses());
+			}
+			else
+			{
+				SetCondition(0.0f);
+			}
+		}
+	}
+
+	DECLARE_SCRIPT_REGISTER_FUNCTION
+};

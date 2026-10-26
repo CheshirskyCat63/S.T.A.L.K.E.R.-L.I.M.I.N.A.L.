@@ -1,0 +1,192 @@
+#pragma once
+#include "object_interfaces.h"
+#include "alife_space.h"
+#include "game_graph_space.h"
+#include "../xrUI/uiabstract.h"
+#include "../xrUI/ui_defs.h"
+
+enum class ECompassSpotKind : u8
+{
+    Generic = 0,
+    Mission,
+    Npc
+};
+
+class CMapSpot;
+class CMiniMapSpot;
+class CMapSpotPointer;
+class CComplexMapSpot;
+class CUICustomMap;
+class CInventoryOwner;
+
+class CMapLocation :
+    public IPureDestroyableObject
+{
+public:
+enum ELocationFlags
+{
+	eSerailizable		= (1<<0),
+	eHideInOffline		= (1<<1),
+	eTTL				= (1<<2),
+	ePosToActor			= (1<<3),
+	ePointerEnabled		= (1<<4),
+	eSpotEnabled		= (1<<5),
+	eCollidable			= (1<<6),
+	eHintEnabled		= (1<<7),
+	eUserDefined		= (1 << 8),
+	eShowOnCompass		= (1 << 9),
+};
+
+protected:
+	const char*					m_type;
+	flags32					m_flags;
+	shared_str				m_hint;
+	CMapSpot*				m_level_spot;
+	CMapSpotPointer*		m_level_spot_pointer;
+	CMiniMapSpot*			m_minimap_spot;
+	CMapSpotPointer*		m_minimap_spot_pointer;
+	CComplexMapSpot*		m_complex_spot;
+	CMapSpotPointer*		m_complex_spot_pointer;
+
+	shared_str				m_spot_border_names			[6];
+	CMapSpot*				m_level_map_spot_border;
+	CMapSpot*				m_mini_map_spot_border;
+	CMapSpot*				m_complex_spot_border;
+
+	CMapSpot*				m_level_map_spot_border_na;
+	CMapSpot*				m_mini_map_spot_border_na;
+	CMapSpot*				m_complex_spot_border_na;
+
+	ALife::_OBJECT_ID		m_objectID;
+	CSE_ALifeDynamicObject*	m_owner_se_object;
+	int						m_ttl;
+	u32						m_actual_time;
+	Fvector					m_position_global; //last global position, actual time only current frame 
+	Fvector2 				m_position_on_map; //last position on parent map, actual time only current frame
+	struct SCachedValues{
+		u32					m_updatedFrame;
+		GameGraph::_GRAPH_ID m_graphID;
+		Fvector2			m_Position;
+		Fvector2			m_Direction;
+		shared_str			m_LevelName;
+		bool				m_Actuality;
+	};
+	SCachedValues			m_cached;
+	shared_str				m_compass_spot_texture;
+	u32						m_compass_spot_color;
+	Fvector2				m_compass_spot_size;
+	shared_str				m_compassOverrideTexture;
+	Fvector2				m_compassOverrideSize;
+	u32						m_compassOverrideColor;
+	float					m_compassOverrideOffsetX;
+	float					m_compassOverrideOffsetY;
+	float					m_compassOverrideMaxDist;
+	EVTextAlignment			m_compassOverrideVertAlign;
+	bool					m_hasCompassOverride;
+	bool					m_compassShadowOverridden;
+	SUITextureShadowParams	m_compassShadow;
+private:
+							CMapLocation					(const CMapLocation&){R_ASSERT(0);} //disable copy ctor
+
+protected:
+	void					LoadSpot						(const char* type, bool bReload); 
+	void					UpdateSpot						(CUICustomMap* map, CMapSpot* sp );
+	void					UpdateSpotPointer				(CUICustomMap* map, CMapSpotPointer* sp);
+	void					CalcLevelName					();
+	CMapSpotPointer*		GetSpotPointer					(CMapSpot* sp);
+	CMapSpot*				GetSpotBorder					(CMapSpot* sp);
+public:
+							CMapLocation					(const char* type, ALife::_OBJECT_ID object_id, bool is_user_loc = false);
+	virtual					~CMapLocation					();
+	virtual void			destroy							();
+
+	IC		const char*			GetType				() const		{ return m_type; };
+	Fvector2				SpotSize			();
+	IC bool					IsUserDefined		() const		{ return !!m_flags.test(eUserDefined); }
+	IC void					SetUserDefinedFlag	(bool state)	{ m_flags.set(eUserDefined, state); }
+	void					InitUserSpot		(const shared_str& level_name, const Fvector& pos);
+	void					HighlightSpot		(bool state, const Fcolor& color);
+
+	IC		bool			HintEnabled						()					{return !!m_flags.test(eHintEnabled);}
+			const char*			GetHint							();
+	void					SetHint							(const shared_str& hint);
+	CComplexMapSpot*		complex_spot					()					{return m_complex_spot;}
+	const CMapSpot*			LevelMapSpot					()					{return m_level_spot;}
+	const CMiniMapSpot*		MiniMapSpot						()					{return m_minimap_spot;}
+
+	IC bool					PointerEnabled					()					{return SpotEnabled() && !!m_flags.test(ePointerEnabled);};
+	IC void					EnablePointer					()					{m_flags.set(ePointerEnabled,true);};
+	IC void					DisablePointer					()					{m_flags.set(ePointerEnabled,false);};
+
+	IC bool					Collidable						() const			{return !!m_flags.test(eCollidable);}
+	IC bool					SpotEnabled						()					{return !!m_flags.test(eSpotEnabled);};
+	void					EnableSpot						()					{m_flags.set(eSpotEnabled,true);};
+	void					DisableSpot						()					{m_flags.set(eSpotEnabled,false);};
+	virtual void			UpdateMiniMap					(CUICustomMap* map);
+	virtual void			UpdateLevelMap					(CUICustomMap* map);
+
+	Fvector2				CalcPosition					();
+	const Fvector2&			CalcDirection					();
+	IC const shared_str&	GetLevelName					()	{return m_cached.m_LevelName;}
+	IC const char*				GetLPLevelName					()	{return m_cached.m_LevelName.c_str();}
+	const Fvector2&			GetPosition						()	{return m_cached.m_Position;}
+	IC bool					ShowOnCompass					()	const { return !!m_flags.test(eShowOnCompass); }
+	IC bool					HasCompassConfig				()	const { return m_hasCompassOverride; }
+	const shared_str&		GetCompassSpotTexture			()	const { return m_compass_spot_texture; }
+	IC u32					GetCompassSpotColor				()	const { return m_compass_spot_color; }
+	Fvector2				GetCompassSpotSize				()	const { return m_compass_spot_size; }
+	const shared_str&		GetCompassTexture				()	const;
+	Fvector2				GetCompassSize					()	const;
+	u32						GetCompassColor					()	const;
+	float					GetCompassOffsetX				()	const;
+	float					GetCompassOffsetY				()	const;
+	float					GetCompassMaxDist				()	const; // not specified or 0.0f = infinite, > 0.0f = distance in meters
+	EVTextAlignment			GetCompassVertAlign				()	const;
+	const SUITextureShadowParams& GetCompassTextureShadow	()	const { return m_compassShadow; }
+	IC bool					HasCompassShadowOverride		()	const { return m_compassShadowOverridden; }
+	virtual shared_str		GetSpotName					()	const { return m_type; }
+	ECompassSpotKind		GetCompassSpotKind				()	const;
+
+	ALife::_OBJECT_ID		ObjectID						() const {return m_objectID;}
+	virtual		bool		Update							();
+	Fvector					GetLastPosition					() {return m_position_global;};
+	bool					Serializable					() const {return !!m_flags.test(eSerailizable);}
+	void					SetSerializable					(bool b) {m_flags.set(eSerailizable,b);}
+
+	virtual void			save							(IWriter &stream);
+	virtual void			load							(IReader &stream);
+	virtual void			serialize(ISaveObject& Object);
+
+	shared_str				m_owner_task_id;
+
+#ifdef DEBUG
+	virtual void			Dump							(){};
+#endif
+
+};
+
+class CRelationMapLocation : public CMapLocation
+{
+	using inherited = CMapLocation;
+	shared_str				m_curr_spot_name;
+	ALife::_OBJECT_ID		m_pInvOwnerActorID;
+	ALife::ERelationType	m_last_relation;
+	bool					m_b_visible;
+	bool					m_b_minimap_visible;
+	bool					m_b_levelmap_visible;
+protected:
+	bool					IsVisible							() const {return m_b_visible;};
+public:
+							CRelationMapLocation			(const shared_str& type, ALife::_OBJECT_ID object_id, ALife::_OBJECT_ID pInvOwnerActorID);
+	virtual					~CRelationMapLocation			();
+	virtual bool			Update							();
+
+	virtual void			UpdateMiniMap					(CUICustomMap* map);
+	virtual void			UpdateLevelMap					(CUICustomMap* map);
+
+	shared_str				GetSpotName					()	const override { return m_curr_spot_name; }
+
+#ifdef DEBUG
+	virtual void			Dump							();
+#endif
+};

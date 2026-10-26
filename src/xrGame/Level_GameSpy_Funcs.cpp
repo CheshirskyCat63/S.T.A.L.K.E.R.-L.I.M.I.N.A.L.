@@ -1,0 +1,37 @@
+#include "StdAfx.h"
+#include "Level.h"
+#include "xrMessages.h"
+#include "../xrEngine/x_ray.h"
+
+#ifdef XR_MP_BUILD
+#include "gamespy/GameSpy_GCD_Client.h"
+#endif
+
+#include "../xrEngine/IGame_Persistent.h"
+void CLevel::OnGameSpyChallenge(NET_Packet* P)
+{
+#ifdef XR_MP_BUILD
+#ifndef MASTER_GOLD
+	Msg("xrGS::CDKey::Level : Responding on Challenge");
+#endif // #ifndef MASTER_GOLD
+
+	u8	Reauth = P->r_u8();
+	string64 ChallengeStr;
+	P->r_stringZ(ChallengeStr);
+	
+	//--------------------------------------------------------------------
+	string128 ResponseStr="";
+	CGameSpy_GCD_Client GCD;
+	GCD.CreateRespond(ResponseStr, ChallengeStr, Reauth);
+	//--------- Send Respond ---------------------------------------------
+	NET_Packet newP;
+
+	newP.w_begin	(M_GAMESPY_CDKEY_VALIDATION_CHALLENGE_RESPOND);
+	newP.w_stringZ(ResponseStr);
+	Send(newP, net_flags(true, true, true, true));
+#endif
+
+	g_pGamePersistent->SetLoadStageTitle("st_validating_cdkey");
+	g_pGamePersistent->LoadTitle();
+};
+

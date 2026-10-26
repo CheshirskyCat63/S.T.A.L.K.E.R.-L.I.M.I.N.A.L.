@@ -1,0 +1,977 @@
+{
+  "schema": "humanoid_rig_profile_v1",
+  "id": "native47_hud42_humanoid61",
+  "version": 1,
+  "actor47": [
+    {
+      "name": "root_stalker",
+      "parent": "",
+      "role": "body_root"
+    },
+    {
+      "name": "bip01",
+      "parent": "root_stalker",
+      "role": "pelvis_container"
+    },
+    {
+      "name": "bip01_pelvis",
+      "parent": "bip01",
+      "role": "pelvis"
+    },
+    {
+      "name": "bip01_l_thigh",
+      "parent": "bip01_pelvis",
+      "role": "l_thigh"
+    },
+    {
+      "name": "bip01_l_calf",
+      "parent": "bip01_l_thigh",
+      "role": "l_calf"
+    },
+    {
+      "name": "bip01_l_foot",
+      "parent": "bip01_l_calf",
+      "role": "l_foot"
+    },
+    {
+      "name": "bip01_l_toe0",
+      "parent": "bip01_l_foot",
+      "role": "l_toe0"
+    },
+    {
+      "name": "bip01_r_thigh",
+      "parent": "bip01_pelvis",
+      "role": "r_thigh"
+    },
+    {
+      "name": "bip01_r_calf",
+      "parent": "bip01_r_thigh",
+      "role": "r_calf"
+    },
+    {
+      "name": "bip01_r_foot",
+      "parent": "bip01_r_calf",
+      "role": "r_foot"
+    },
+    {
+      "name": "bip01_r_toe0",
+      "parent": "bip01_r_foot",
+      "role": "r_toe0"
+    },
+    {
+      "name": "bip01_spine",
+      "parent": "bip01_pelvis",
+      "role": "spine"
+    },
+    {
+      "name": "bip01_spine1",
+      "parent": "bip01_spine",
+      "role": "spine1"
+    },
+    {
+      "name": "bip01_spine2",
+      "parent": "bip01_spine1",
+      "role": "spine2"
+    },
+    {
+      "name": "bip01_neck",
+      "parent": "bip01_spine2",
+      "role": "neck"
+    },
+    {
+      "name": "bip01_head",
+      "parent": "bip01_neck",
+      "role": "head"
+    },
+    {
+      "name": "eye_left",
+      "parent": "bip01_head",
+      "role": "eye_left"
+    },
+    {
+      "name": "eye_right",
+      "parent": "bip01_head",
+      "role": "eye_right"
+    },
+    {
+      "name": "eyelid_1",
+      "parent": "bip01_head",
+      "role": "eyelid_1"
+    },
+    {
+      "name": "jaw_1",
+      "parent": "bip01_head",
+      "role": "jaw_1"
+    },
+    {
+      "name": "bip01_l_clavicle",
+      "parent": "bip01_neck",
+      "role": "l_clavicle"
+    },
+    {
+      "name": "bip01_l_upperarm",
+      "parent": "bip01_l_clavicle",
+      "role": "l_upperarm"
+    },
+    {
+      "name": "bip01_l_forearm",
+      "parent": "bip01_l_upperarm",
+      "role": "l_forearm"
+    },
+    {
+      "name": "bip01_l_hand",
+      "parent": "bip01_l_forearm",
+      "role": "l_hand"
+    },
+    {
+      "name": "bip01_l_finger0",
+      "parent": "bip01_l_hand",
+      "role": "l_finger0"
+    },
+    {
+      "name": "bip01_l_finger01",
+      "parent": "bip01_l_finger0",
+      "role": "l_finger01"
+    },
+    {
+      "name": "bip01_l_finger02",
+      "parent": "bip01_l_finger01",
+      "role": "l_finger02"
+    },
+    {
+      "name": "bip01_l_finger1",
+      "parent": "bip01_l_hand",
+      "role": "l_finger1"
+    },
+    {
+      "name": "bip01_l_finger11",
+      "parent": "bip01_l_finger1",
+      "role": "l_finger11"
+    },
+    {
+      "name": "bip01_l_finger12",
+      "parent": "bip01_l_finger11",
+      "role": "l_finger12"
+    },
+    {
+      "name": "bip01_l_finger2",
+      "parent": "bip01_l_hand",
+      "role": "l_finger2"
+    },
+    {
+      "name": "bip01_l_finger21",
+      "parent": "bip01_l_finger2",
+      "role": "l_finger21"
+    },
+    {
+      "name": "bip01_l_finger22",
+      "parent": "bip01_l_finger21",
+      "role": "l_finger22"
+    },
+    {
+      "name": "bip01_r_clavicle",
+      "parent": "bip01_neck",
+      "role": "r_clavicle"
+    },
+    {
+      "name": "bip01_r_upperarm",
+      "parent": "bip01_r_clavicle",
+      "role": "r_upperarm"
+    },
+    {
+      "name": "bip01_r_forearm",
+      "parent": "bip01_r_upperarm",
+      "role": "r_forearm"
+    },
+    {
+      "name": "bip01_r_hand",
+      "parent": "bip01_r_forearm",
+      "role": "r_hand"
+    },
+    {
+      "name": "bip01_r_finger0",
+      "parent": "bip01_r_hand",
+      "role": "r_finger0"
+    },
+    {
+      "name": "bip01_r_finger01",
+      "parent": "bip01_r_finger0",
+      "role": "r_finger01"
+    },
+    {
+      "name": "bip01_r_finger02",
+      "parent": "bip01_r_finger01",
+      "role": "r_finger02"
+    },
+    {
+      "name": "bip01_r_finger1",
+      "parent": "bip01_r_hand",
+      "role": "r_finger1"
+    },
+    {
+      "name": "bip01_r_finger11",
+      "parent": "bip01_r_finger1",
+      "role": "r_finger11"
+    },
+    {
+      "name": "bip01_r_finger12",
+      "parent": "bip01_r_finger11",
+      "role": "r_finger12"
+    },
+    {
+      "name": "bip01_r_finger2",
+      "parent": "bip01_r_hand",
+      "role": "r_finger2"
+    },
+    {
+      "name": "bip01_r_finger21",
+      "parent": "bip01_r_finger2",
+      "role": "r_finger21"
+    },
+    {
+      "name": "bip01_r_finger22",
+      "parent": "bip01_r_finger21",
+      "role": "r_finger22"
+    },
+    {
+      "name": "bip01_tail",
+      "parent": "bip01_pelvis",
+      "role": "tail"
+    }
+  ],
+  "donor42": [
+    {
+      "name": "bip01",
+      "parent": "",
+      "role": "source_root"
+    },
+    {
+      "name": "l_clavicle",
+      "parent": "bip01",
+      "role": "l_clavicle"
+    },
+    {
+      "name": "l_upperarm",
+      "parent": "l_clavicle",
+      "role": "l_upperarm"
+    },
+    {
+      "name": "l_forearm",
+      "parent": "l_upperarm",
+      "role": "l_forearm"
+    },
+    {
+      "name": "l_forearm_twist",
+      "parent": "l_forearm",
+      "role": "l_forearm_twist"
+    },
+    {
+      "name": "l_hand",
+      "parent": "l_forearm",
+      "role": "l_hand"
+    },
+    {
+      "name": "bip01_l_finger1",
+      "parent": "l_hand",
+      "role": "l_finger1"
+    },
+    {
+      "name": "bip01_l_finger11",
+      "parent": "bip01_l_finger1",
+      "role": "l_finger11"
+    },
+    {
+      "name": "bip01_l_finger12",
+      "parent": "bip01_l_finger11",
+      "role": "l_finger12"
+    },
+    {
+      "name": "bip01_l_finger2",
+      "parent": "l_hand",
+      "role": "l_finger2"
+    },
+    {
+      "name": "bip01_l_finger21",
+      "parent": "bip01_l_finger2",
+      "role": "l_finger21"
+    },
+    {
+      "name": "bip01_l_finger22",
+      "parent": "bip01_l_finger21",
+      "role": "l_finger22"
+    },
+    {
+      "name": "bip01_l_finger3",
+      "parent": "l_hand",
+      "role": "l_finger3"
+    },
+    {
+      "name": "bip01_l_finger31",
+      "parent": "bip01_l_finger3",
+      "role": "l_finger31"
+    },
+    {
+      "name": "bip01_l_finger32",
+      "parent": "bip01_l_finger31",
+      "role": "l_finger32"
+    },
+    {
+      "name": "bip01_l_finger4",
+      "parent": "l_hand",
+      "role": "l_finger4"
+    },
+    {
+      "name": "bip01_l_finger41",
+      "parent": "bip01_l_finger4",
+      "role": "l_finger41"
+    },
+    {
+      "name": "bip01_l_finger42",
+      "parent": "bip01_l_finger41",
+      "role": "l_finger42"
+    },
+    {
+      "name": "l_finger0",
+      "parent": "l_hand",
+      "role": "l_finger0"
+    },
+    {
+      "name": "l_finger01",
+      "parent": "l_finger0",
+      "role": "l_finger01"
+    },
+    {
+      "name": "l_finger02",
+      "parent": "l_finger01",
+      "role": "l_finger02"
+    },
+    {
+      "name": "lead_gun",
+      "parent": "bip01",
+      "role": "item_anchor"
+    },
+    {
+      "name": "r_clavicle",
+      "parent": "bip01",
+      "role": "r_clavicle"
+    },
+    {
+      "name": "r_upperarm",
+      "parent": "r_clavicle",
+      "role": "r_upperarm"
+    },
+    {
+      "name": "r_forearm",
+      "parent": "r_upperarm",
+      "role": "r_forearm"
+    },
+    {
+      "name": "r_forearm_twist",
+      "parent": "r_forearm",
+      "role": "r_forearm_twist"
+    },
+    {
+      "name": "r_hand",
+      "parent": "r_forearm",
+      "role": "r_hand"
+    },
+    {
+      "name": "bip01_r_finger1",
+      "parent": "r_hand",
+      "role": "r_finger1"
+    },
+    {
+      "name": "bip01_r_finger11",
+      "parent": "bip01_r_finger1",
+      "role": "r_finger11"
+    },
+    {
+      "name": "bip01_r_finger12",
+      "parent": "bip01_r_finger11",
+      "role": "r_finger12"
+    },
+    {
+      "name": "bip01_r_finger2",
+      "parent": "r_hand",
+      "role": "r_finger2"
+    },
+    {
+      "name": "bip01_r_finger21",
+      "parent": "bip01_r_finger2",
+      "role": "r_finger21"
+    },
+    {
+      "name": "bip01_r_finger22",
+      "parent": "bip01_r_finger21",
+      "role": "r_finger22"
+    },
+    {
+      "name": "bip01_r_finger3",
+      "parent": "r_hand",
+      "role": "r_finger3"
+    },
+    {
+      "name": "bip01_r_finger31",
+      "parent": "bip01_r_finger3",
+      "role": "r_finger31"
+    },
+    {
+      "name": "bip01_r_finger32",
+      "parent": "bip01_r_finger31",
+      "role": "r_finger32"
+    },
+    {
+      "name": "bip01_r_finger4",
+      "parent": "r_hand",
+      "role": "r_finger4"
+    },
+    {
+      "name": "bip01_r_finger41",
+      "parent": "bip01_r_finger4",
+      "role": "r_finger41"
+    },
+    {
+      "name": "bip01_r_finger42",
+      "parent": "bip01_r_finger41",
+      "role": "r_finger42"
+    },
+    {
+      "name": "r_finger0",
+      "parent": "r_hand",
+      "role": "r_finger0"
+    },
+    {
+      "name": "r_finger01",
+      "parent": "r_finger0",
+      "role": "r_finger01"
+    },
+    {
+      "name": "r_finger02",
+      "parent": "r_finger01",
+      "role": "r_finger02"
+    }
+  ],
+  "target61": [
+    {
+      "name": "root_stalker",
+      "parent": "",
+      "role": "body_root"
+    },
+    {
+      "name": "bip01",
+      "parent": "root_stalker",
+      "role": "pelvis_container"
+    },
+    {
+      "name": "bip01_pelvis",
+      "parent": "bip01",
+      "role": "pelvis"
+    },
+    {
+      "name": "bip01_l_thigh",
+      "parent": "bip01_pelvis",
+      "role": "l_thigh"
+    },
+    {
+      "name": "bip01_l_calf",
+      "parent": "bip01_l_thigh",
+      "role": "l_calf"
+    },
+    {
+      "name": "bip01_l_foot",
+      "parent": "bip01_l_calf",
+      "role": "l_foot"
+    },
+    {
+      "name": "bip01_l_toe0",
+      "parent": "bip01_l_foot",
+      "role": "l_toe0"
+    },
+    {
+      "name": "bip01_r_thigh",
+      "parent": "bip01_pelvis",
+      "role": "r_thigh"
+    },
+    {
+      "name": "bip01_r_calf",
+      "parent": "bip01_r_thigh",
+      "role": "r_calf"
+    },
+    {
+      "name": "bip01_r_foot",
+      "parent": "bip01_r_calf",
+      "role": "r_foot"
+    },
+    {
+      "name": "bip01_r_toe0",
+      "parent": "bip01_r_foot",
+      "role": "r_toe0"
+    },
+    {
+      "name": "bip01_spine",
+      "parent": "bip01_pelvis",
+      "role": "spine"
+    },
+    {
+      "name": "bip01_spine1",
+      "parent": "bip01_spine",
+      "role": "spine1"
+    },
+    {
+      "name": "bip01_spine2",
+      "parent": "bip01_spine1",
+      "role": "spine2"
+    },
+    {
+      "name": "bip01_neck",
+      "parent": "bip01_spine2",
+      "role": "neck"
+    },
+    {
+      "name": "bip01_head",
+      "parent": "bip01_neck",
+      "role": "head"
+    },
+    {
+      "name": "eye_left",
+      "parent": "bip01_head",
+      "role": "eye_left"
+    },
+    {
+      "name": "eye_right",
+      "parent": "bip01_head",
+      "role": "eye_right"
+    },
+    {
+      "name": "eyelid_1",
+      "parent": "bip01_head",
+      "role": "eyelid_1"
+    },
+    {
+      "name": "jaw_1",
+      "parent": "bip01_head",
+      "role": "jaw_1"
+    },
+    {
+      "name": "bip01_l_clavicle",
+      "parent": "bip01_neck",
+      "role": "l_clavicle"
+    },
+    {
+      "name": "bip01_l_upperarm",
+      "parent": "bip01_l_clavicle",
+      "role": "l_upperarm"
+    },
+    {
+      "name": "bip01_l_forearm",
+      "parent": "bip01_l_upperarm",
+      "role": "l_forearm"
+    },
+    {
+      "name": "bip01_l_hand",
+      "parent": "bip01_l_forearm",
+      "role": "l_hand"
+    },
+    {
+      "name": "bip01_l_finger0",
+      "parent": "bip01_l_hand",
+      "role": "l_finger0"
+    },
+    {
+      "name": "bip01_l_finger01",
+      "parent": "bip01_l_finger0",
+      "role": "l_finger01"
+    },
+    {
+      "name": "bip01_l_finger02",
+      "parent": "bip01_l_finger01",
+      "role": "l_finger02"
+    },
+    {
+      "name": "bip01_l_finger1",
+      "parent": "bip01_l_hand",
+      "role": "l_finger1"
+    },
+    {
+      "name": "bip01_l_finger11",
+      "parent": "bip01_l_finger1",
+      "role": "l_finger11"
+    },
+    {
+      "name": "bip01_l_finger12",
+      "parent": "bip01_l_finger11",
+      "role": "l_finger12"
+    },
+    {
+      "name": "bip01_l_finger2",
+      "parent": "bip01_l_hand",
+      "role": "l_finger2"
+    },
+    {
+      "name": "bip01_l_finger21",
+      "parent": "bip01_l_finger2",
+      "role": "l_finger21"
+    },
+    {
+      "name": "bip01_l_finger22",
+      "parent": "bip01_l_finger21",
+      "role": "l_finger22"
+    },
+    {
+      "name": "bip01_r_clavicle",
+      "parent": "bip01_neck",
+      "role": "r_clavicle"
+    },
+    {
+      "name": "bip01_r_upperarm",
+      "parent": "bip01_r_clavicle",
+      "role": "r_upperarm"
+    },
+    {
+      "name": "bip01_r_forearm",
+      "parent": "bip01_r_upperarm",
+      "role": "r_forearm"
+    },
+    {
+      "name": "bip01_r_hand",
+      "parent": "bip01_r_forearm",
+      "role": "r_hand"
+    },
+    {
+      "name": "bip01_r_finger0",
+      "parent": "bip01_r_hand",
+      "role": "r_finger0"
+    },
+    {
+      "name": "bip01_r_finger01",
+      "parent": "bip01_r_finger0",
+      "role": "r_finger01"
+    },
+    {
+      "name": "bip01_r_finger02",
+      "parent": "bip01_r_finger01",
+      "role": "r_finger02"
+    },
+    {
+      "name": "bip01_r_finger1",
+      "parent": "bip01_r_hand",
+      "role": "r_finger1"
+    },
+    {
+      "name": "bip01_r_finger11",
+      "parent": "bip01_r_finger1",
+      "role": "r_finger11"
+    },
+    {
+      "name": "bip01_r_finger12",
+      "parent": "bip01_r_finger11",
+      "role": "r_finger12"
+    },
+    {
+      "name": "bip01_r_finger2",
+      "parent": "bip01_r_hand",
+      "role": "r_finger2"
+    },
+    {
+      "name": "bip01_r_finger21",
+      "parent": "bip01_r_finger2",
+      "role": "r_finger21"
+    },
+    {
+      "name": "bip01_r_finger22",
+      "parent": "bip01_r_finger21",
+      "role": "r_finger22"
+    },
+    {
+      "name": "bip01_tail",
+      "parent": "bip01_pelvis",
+      "role": "tail"
+    },
+    {
+      "name": "bip01_l_finger3",
+      "parent": "bip01_l_hand",
+      "role": "l_finger3"
+    },
+    {
+      "name": "bip01_l_finger31",
+      "parent": "bip01_l_finger3",
+      "role": "l_finger31"
+    },
+    {
+      "name": "bip01_l_finger32",
+      "parent": "bip01_l_finger31",
+      "role": "l_finger32"
+    },
+    {
+      "name": "bip01_l_finger4",
+      "parent": "bip01_l_hand",
+      "role": "l_finger4"
+    },
+    {
+      "name": "bip01_l_finger41",
+      "parent": "bip01_l_finger4",
+      "role": "l_finger41"
+    },
+    {
+      "name": "bip01_l_finger42",
+      "parent": "bip01_l_finger41",
+      "role": "l_finger42"
+    },
+    {
+      "name": "bip01_r_finger3",
+      "parent": "bip01_r_hand",
+      "role": "r_finger3"
+    },
+    {
+      "name": "bip01_r_finger31",
+      "parent": "bip01_r_finger3",
+      "role": "r_finger31"
+    },
+    {
+      "name": "bip01_r_finger32",
+      "parent": "bip01_r_finger31",
+      "role": "r_finger32"
+    },
+    {
+      "name": "bip01_r_finger4",
+      "parent": "bip01_r_hand",
+      "role": "r_finger4"
+    },
+    {
+      "name": "bip01_r_finger41",
+      "parent": "bip01_r_finger4",
+      "role": "r_finger41"
+    },
+    {
+      "name": "bip01_r_finger42",
+      "parent": "bip01_r_finger41",
+      "role": "r_finger42"
+    },
+    {
+      "name": "bip01_l_forearm_twist",
+      "parent": "bip01_l_forearm",
+      "role": "l_forearm_twist"
+    },
+    {
+      "name": "bip01_r_forearm_twist",
+      "parent": "bip01_r_forearm",
+      "role": "r_forearm_twist"
+    }
+  ],
+  "donor_to_target": [
+    {
+      "source": "l_clavicle",
+      "target": "bip01_l_clavicle",
+      "role": "l_clavicle"
+    },
+    {
+      "source": "l_upperarm",
+      "target": "bip01_l_upperarm",
+      "role": "l_upperarm"
+    },
+    {
+      "source": "l_forearm",
+      "target": "bip01_l_forearm",
+      "role": "l_forearm"
+    },
+    {
+      "source": "l_forearm_twist",
+      "target": "bip01_l_forearm_twist",
+      "role": "l_forearm_twist"
+    },
+    {
+      "source": "l_hand",
+      "target": "bip01_l_hand",
+      "role": "l_hand"
+    },
+    {
+      "source": "bip01_l_finger1",
+      "target": "bip01_l_finger1",
+      "role": "l_finger1"
+    },
+    {
+      "source": "bip01_l_finger11",
+      "target": "bip01_l_finger11",
+      "role": "l_finger11"
+    },
+    {
+      "source": "bip01_l_finger12",
+      "target": "bip01_l_finger12",
+      "role": "l_finger12"
+    },
+    {
+      "source": "bip01_l_finger2",
+      "target": "bip01_l_finger2",
+      "role": "l_finger2"
+    },
+    {
+      "source": "bip01_l_finger21",
+      "target": "bip01_l_finger21",
+      "role": "l_finger21"
+    },
+    {
+      "source": "bip01_l_finger22",
+      "target": "bip01_l_finger22",
+      "role": "l_finger22"
+    },
+    {
+      "source": "bip01_l_finger3",
+      "target": "bip01_l_finger3",
+      "role": "l_finger3"
+    },
+    {
+      "source": "bip01_l_finger31",
+      "target": "bip01_l_finger31",
+      "role": "l_finger31"
+    },
+    {
+      "source": "bip01_l_finger32",
+      "target": "bip01_l_finger32",
+      "role": "l_finger32"
+    },
+    {
+      "source": "bip01_l_finger4",
+      "target": "bip01_l_finger4",
+      "role": "l_finger4"
+    },
+    {
+      "source": "bip01_l_finger41",
+      "target": "bip01_l_finger41",
+      "role": "l_finger41"
+    },
+    {
+      "source": "bip01_l_finger42",
+      "target": "bip01_l_finger42",
+      "role": "l_finger42"
+    },
+    {
+      "source": "l_finger0",
+      "target": "bip01_l_finger0",
+      "role": "l_finger0"
+    },
+    {
+      "source": "l_finger01",
+      "target": "bip01_l_finger01",
+      "role": "l_finger01"
+    },
+    {
+      "source": "l_finger02",
+      "target": "bip01_l_finger02",
+      "role": "l_finger02"
+    },
+    {
+      "source": "r_clavicle",
+      "target": "bip01_r_clavicle",
+      "role": "r_clavicle"
+    },
+    {
+      "source": "r_upperarm",
+      "target": "bip01_r_upperarm",
+      "role": "r_upperarm"
+    },
+    {
+      "source": "r_forearm",
+      "target": "bip01_r_forearm",
+      "role": "r_forearm"
+    },
+    {
+      "source": "r_forearm_twist",
+      "target": "bip01_r_forearm_twist",
+      "role": "r_forearm_twist"
+    },
+    {
+      "source": "r_hand",
+      "target": "bip01_r_hand",
+      "role": "r_hand"
+    },
+    {
+      "source": "bip01_r_finger1",
+      "target": "bip01_r_finger1",
+      "role": "r_finger1"
+    },
+    {
+      "source": "bip01_r_finger11",
+      "target": "bip01_r_finger11",
+      "role": "r_finger11"
+    },
+    {
+      "source": "bip01_r_finger12",
+      "target": "bip01_r_finger12",
+      "role": "r_finger12"
+    },
+    {
+      "source": "bip01_r_finger2",
+      "target": "bip01_r_finger2",
+      "role": "r_finger2"
+    },
+    {
+      "source": "bip01_r_finger21",
+      "target": "bip01_r_finger21",
+      "role": "r_finger21"
+    },
+    {
+      "source": "bip01_r_finger22",
+      "target": "bip01_r_finger22",
+      "role": "r_finger22"
+    },
+    {
+      "source": "bip01_r_finger3",
+      "target": "bip01_r_finger3",
+      "role": "r_finger3"
+    },
+    {
+      "source": "bip01_r_finger31",
+      "target": "bip01_r_finger31",
+      "role": "r_finger31"
+    },
+    {
+      "source": "bip01_r_finger32",
+      "target": "bip01_r_finger32",
+      "role": "r_finger32"
+    },
+    {
+      "source": "bip01_r_finger4",
+      "target": "bip01_r_finger4",
+      "role": "r_finger4"
+    },
+    {
+      "source": "bip01_r_finger41",
+      "target": "bip01_r_finger41",
+      "role": "r_finger41"
+    },
+    {
+      "source": "bip01_r_finger42",
+      "target": "bip01_r_finger42",
+      "role": "r_finger42"
+    },
+    {
+      "source": "r_finger0",
+      "target": "bip01_r_finger0",
+      "role": "r_finger0"
+    },
+    {
+      "source": "r_finger01",
+      "target": "bip01_r_finger01",
+      "role": "r_finger01"
+    },
+    {
+      "source": "r_finger02",
+      "target": "bip01_r_finger02",
+      "role": "r_finger02"
+    }
+  ],
+  "source_root": "bip01",
+  "source_item_anchor": "lead_gun",
+  "target_root": "root_stalker",
+  "geometry_policy": {
+    "preserve_surface_bytes": true,
+    "max_influences": 4,
+    "required_non_thumb_branches_per_hand": 4,
+    "minimum_distal_welded_vertices": 6,
+    "weld_epsilon_metres": 1e-05,
+    "stable_cut_count": 3,
+    "allow_rebind_existing_middle_group": true,
+    "reject_inseparable_fingers": true
+  },
+  "manifest_schema": "humanoid_resources_v1"
+}

@@ -1,0 +1,688 @@
+#include "stdafx.h"
+#include "IGame_Level.h"
+#include "IGame_Persistent.h"
+
+#include "CameraManager.h"
+#include "CustomHUD.h"
+#include "Feel_Sound.h"
+#include "../xrSound/ai_sounds.h"
+#include "../xrCore/Kernel/EngineExternal.h"
+#include "Render.h"
+#include "std_classes.h"
+#include "xrLevel.h"
+#include "xr_object.h"
+#include "x_ray.h"
+#include "GameMtlLib.h"
+#include "../xrGame/AnimNotify/AnimNotifyGame.h"
+
+ENGINE_API	IGame_Level*	g_pGameLevel	= nullptr;
+extern	bool g_bLoaded;
+
+class AudioAiTraceState final
+{
+	struct ListenerSample
+	{
+		u16 Id = u16(-1);
+		u32 Count = 0;
+	};
+
+	xrCriticalSection Lock;
+	ListenerSample Listeners[24] = {};
+	u64 Sequence = 0;
+	u32 WindowStart = 0;
+	u32 Deliveries = 0;
+	u32 States = 0;
+	u32 DeliverySuppressed = 0;
+	u32 StateSuppressed = 0;
+
+	void UpdateWindow()
+	{
+		if (Device.dwTimeGlobal >= WindowStart && Device.dwTimeGlobal - WindowStart < 5000)
+		{
+			return;
+		}
+		if (Deliveries || States || DeliverySuppressed || StateSuppressed)
+		{
+			Msg("* [LIMINAL_AI_TRACE] phase=budget time=%u deliveries=%u state_changes=%u delivery_suppressed=%u state_suppressed=%u delivery_limit=24 state_limit=24 per_listener_limit=3 window_ms=5000 coverage=sampled",
+				Device.dwTimeGlobal,
+				Deliveries,
+				States,
+				DeliverySuppressed,
+				StateSuppressed);
+		}
+		WindowStart = Device.dwTimeGlobal;
+		Deliveries = States = DeliverySuppressed = StateSuppressed = 0;
+		for (auto& Listener : Listeners)
+		{
+			Listener = {};
+		}
+	}
+
+public:
+	u64 TakeDelivery(u16 ListenerId)
+	{
+		xrCriticalSectionGuard Guard(Lock);
+		UpdateWindow();
+		if (Deliveries < std::size(Listeners))
+		{
+			for (auto& Listener : Listeners)
+			{
+				if (Listener.Count && Listener.Id != ListenerId)
+				{
+					continue;
+				}
+				if (Listener.Count < 3)
+				{
+					Listener.Id = ListenerId;
+					++Listener.Count;
+					++Deliveries;
+					return (++Sequence << 16) | ListenerId;
+				}
+				break;
+			}
+		}
+		++DeliverySuppressed;
+		return 0;
+	}
+
+	bool TakeState()
+	{
+		xrCriticalSectionGuard Guard(Lock);
+		UpdateWindow();
+		if (States < 24)
+		{
+			++States;
+			return true;
+		}
+		++StateSuppressed;
+		return false;
+	}
+};
+
+struct AudioAiTraceContext
+{
+	u64 EventId = 0;
+	const Feel::Sound* Listener = nullptr;
+	const CObject* Source = nullptr;
+};
+
+static AudioAiTraceState g_AudioAiTrace;
+static thread_local AudioAiTraceContext g_AudioAiTraceContext;
+
+u64 GetAudioAiTraceEvent(const Feel::Sound* Listener, const CObject* Source)
+{
+	return g_AudioAiTraceContext.Listener == Listener && g_AudioAiTraceContext.Source == Source ? g_AudioAiTraceContext.EventId : 0;
+}
+
+bool TakeAudioAiTraceState()
+{
+	return g_AudioAiTrace.TakeState();
+}
+
+IGame_Level::IGame_Level	()
+{
+	PROF_EVENT("IGame_Level::IGame_Level");
+	m_pCameras					= new CCameraManager(true);
+	g_pGameLevel				= this;
+	pLevel						= nullptr;
+	bReady						= false;
+	pCurrentEntity				= nullptr;
+	pCurrentViewEntity			= nullptr;
+	pCurrentControlEntity		= nullptr;
+#ifdef DEBUG
+	if (!Device.IsEditorMode())
+	{
+		Device.DumpResourcesMemoryUsage();
+	}
+#endif // DEBUG
+}
+
+IGame_Level::~IGame_Level() noexcept
+{
+	if (Core.ParamsData.test(ECoreParams::nes_texture_storing))
+		Device.m_pRender->ResourcesStoreNecessaryTextures();
+
+	xr_delete(pLevel);
+
+	// Render-level unload
+	Render->level_Unload();
+	xr_delete(m_pCameras);
+	// Unregister
+	if (!g_dedicated_server)
+	{
+		Device.seqRender.Remove(this);
+	}
+
+	Device.seqFrame.Remove(this);
+	CCameraManager::ResetPP();
+
+	Sound->set_geometry_occ(nullptr);
+    Sound->AcousticDynamicRayCallback.clear();
+	Sound->set_handler(nullptr);
+
+#ifdef DEBUG
+	if (!Device.IsEditorMode())
+		Device.DumpResourcesMemoryUsage();
+#endif // DEBUG
+
+	u32		m_base = 0, c_base = 0, m_lmaps = 0, c_lmaps = 0;
+	if (Device.m_pRender)
+		Device.m_pRender->ResourcesGetMemoryUsage(m_base, c_base, m_lmaps, c_lmaps);
+
+	Msg("* [ D3D ]: textures[%d K]", (m_base + m_lmaps) / 1024);
+}
+
+void IGame_Level::net_Stop			()
+{
+	for (int i=0; i<6; i++)
+		Objects.Update			(false);
+	// Destroy all objects
+	Objects.Unload				( );
+	IR_Release					( );
+
+	bReady						= false;	
+}
+
+//-------------------------------------------------------------------------------------------
+//extern CStatTimer				tscreate;
+void  _sound_event		(ref_sound_data_ptr S, float range)
+{
+	if ( g_pGameLevel && S && S->slot )	g_pGameLevel->SoundEvent_Register	(S,range);
+}
+
+void IGame_Level::Load_GameSpecific_CFORM(CDB::TRI* tris, size_t count)
+{
+	struct translation_pair
+	{
+		u32 m_id;
+		u16 m_index;
+
+		IC translation_pair(u32 id, u16 index)
+		{
+			m_id = id;
+			m_index = index;
+		}
+
+		IC bool operator==(const u16& id) const
+		{
+			return (m_id == id);
+		}
+
+		IC bool operator<(const translation_pair& pair) const
+		{
+			return (m_id < pair.m_id);
+		}
+
+		IC bool operator<(const u16& id) const
+		{
+			return (m_id < id);
+		}
+	};
+
+	typedef xr_vector<translation_pair>	ID_INDEX_PAIRS;
+	ID_INDEX_PAIRS						translator;
+	translator.reserve(GMLib.CountMaterial());
+	u16									default_id = (u16)GMLib.GetMaterialIdx("default");
+	translator.push_back(translation_pair(u32(-1), default_id));
+
+	u16									index = 0, static_mtl_count = 1;
+	int max_ID = 0;
+	int max_static_ID = 0;
+	for (GameMtlIt I = GMLib.FirstMaterial(); GMLib.LastMaterial() != I; ++I, ++index) {
+		if (!(*I)->Flags.test(SGameMtl::flDynamic)) {
+			++static_mtl_count;
+			if (Device.IsEditorMode())
+				translator.push_back(translation_pair((*I)->GetID(), (*I)->GetID()));
+			else
+				translator.push_back(translation_pair((*I)->GetID(), index));
+			if ((*I)->GetID() > max_static_ID)	max_static_ID = (*I)->GetID();
+		}
+		if ((*I)->GetID() > max_ID)				max_ID = (*I)->GetID();
+	}
+	// Msg("* Material remapping ID: [Max:%d, StaticMax:%d]",max_ID,max_static_ID);
+	VERIFY(max_static_ID < 0xFFFF);
+
+	if (static_mtl_count < 128) {
+		CDB::TRI* I = tris;
+		CDB::TRI* E = tris + count;
+		for (; I != E; ++I) {
+			ID_INDEX_PAIRS::iterator	i = std::find(translator.begin(), translator.end(), (u16)(*I).material);
+			if (i != translator.end()) {
+				(*I).material = (*i).m_index;
+				SGameMtl* mtl = GMLib.GetMaterialByIdx((*i).m_index);
+				(*I).suppress_shadows = mtl->Flags.is(SGameMtl::flSuppressShadows);
+				(*I).suppress_wm = mtl->Flags.is(SGameMtl::flSuppressWallmarks);
+				continue;
+			}
+			if (Device.IsEditorMode() == false)
+				Debug.fatal(DEBUG_INFO, "Game material '%d' not found", (*I).material);
+		}
+		return;
+	}
+
+	std::sort(translator.begin(), translator.end());
+	{
+		CDB::TRI* I = tris;
+		CDB::TRI* E = tris + count;
+		for (; I != E; ++I) {
+			ID_INDEX_PAIRS::iterator	i = std::lower_bound(translator.begin(), translator.end(), (u16)(*I).material);
+			if ((i != translator.end()) && ((*i).m_id == (*I).material)) {
+				(*I).material = (*i).m_index;
+				SGameMtl* mtl = GMLib.GetMaterialByIdx((*i).m_index);
+				(*I).suppress_shadows = mtl->Flags.is(SGameMtl::flSuppressShadows);
+				(*I).suppress_wm = mtl->Flags.is(SGameMtl::flSuppressWallmarks);
+				continue;
+			}
+			if (Device.IsEditorMode() == false)
+				Debug.fatal(DEBUG_INFO, "Game material '%d' not found", (*I).material);
+		}
+	}
+}
+
+static xrCriticalSection lloadcs;
+bool IGame_Level::Load			(u32 dwNum) 
+{
+	PROF_EVENT("IGame_Level::Load");
+	xrCriticalSectionGuard guard(lloadcs);
+	if (bReady) return true;
+	// Initialize level data
+	pApp->Level_Set				( dwNum );
+	string_path					temp;
+	if (!FS.exist(temp, "$level$", "level.ltx"))
+		Debug.fatal	(DEBUG_INFO,"Can't find level configuration file '%s'.",temp);
+	pLevel						= new CInifile	( temp );
+	
+	UseSnowmask = true;
+	if (pLevel->section_exist("weather") && pLevel->line_exist("weather", "snowmask"))
+	{
+		UseSnowmask = !!pLevel->r_bool("weather", "snowmask");
+	}
+
+	// Open
+	g_pGamePersistent->SetLoadStageTitle	("st_opening_stream");
+	g_pGamePersistent->LoadTitle	();
+	IReader* LL_Stream			= FS.r_open	("$level$","level");
+	IReader	&fs					= *LL_Stream;
+
+	// Header
+	hdrLEVEL					H;
+	fs.r_chunk_safe				(fsL_HEADER,&H,sizeof(H));
+	R_ASSERT2					(XRCL_PRODUCTION_VERSION==H.XRLC_version,"Incompatible level version.");
+
+	// CForms
+	g_pGamePersistent->SetLoadStageTitle("st_loading_cform");
+	g_pGamePersistent->LoadTitle();
+
+	ObjectSpace.Load
+	(
+		[](Fvector * V, size_t Vcnt, CDB::TRI * T, size_t Tcnt, void* params)
+		{
+			g_pGameLevel->Load_GameSpecific_CFORM(T, Tcnt);
+		}
+	);
+
+	//Sound->set_geometry_occ		( &Static );
+	Sound->set_geometry_occ		(ObjectSpace.GetStaticModel	());
+    // Static CFORM alone cannot tell whether a door is currently closed.
+    // Query moving collision objects from the same (main) thread that
+    // updates acoustics. This test is never made by the render callback.
+    Sound->AcousticDynamicRayCallback =
+        xr_delegate<float(const Fvector&, const Fvector&)>(
+            +[](const Fvector& from, const Fvector& to)->float
+    {
+        if (g_pGameLevel == nullptr)
+            return 0.0f;
+        Fvector ray;
+        ray.sub(to, from);
+        const float length = ray.magnitude();
+        if (length <= EPS_S)
+        {
+            return 0.0f;
+        }
+        ray.div(length);
+        // Filter candidates before the native collision query so a stalker
+        // in front of a closed door cannot hide that door from acoustics.
+        const auto DoorCandidate = +[](const collide::ray_defs&, CObject* Object, LPVOID)->bool
+        {
+            if (Object == nullptr)
+            {
+                return false;
+            }
+            const auto IsBarrierName = [](const char* Name)
+            {
+                return Name && (strstr(Name, "door") || strstr(Name, "Door") ||
+                    strstr(Name, "gate") || strstr(Name, "Gate") ||
+                    strstr(Name, "shutter") || strstr(Name, "window") ||
+                    strstr(Name, "Window") || strstr(Name, "airtight"));
+            };
+            return IsBarrierName(Object->cNameSect_str()) || IsBarrierName(Object->cNameVisual().c_str());
+        };
+        collide::rq_results Results;
+        const collide::ray_defs Query(from, ray, length, CDB::OPT_FULL_TEST, collide::rqtDyn);
+        g_pGameLevel->ObjectSpace.RayQuery(Results, Query, nullptr, nullptr,
+            DoorCandidate, g_pGameLevel->CurrentEntity());
+        return Results.r_count() != 0 ? 0.86f : 0.0f;
+    });
+	Sound->set_handler			( _sound_event );
+
+	pApp->LoadSwitch			();
+
+
+	// HUD + Environment
+	if(!g_hud)
+		g_hud					= (CCustomHUD*)NEW_INSTANCE	(CLSID_HUDMANAGER);
+
+	// Render-level Load
+	try {
+		Render->level_Unload(); // try to unload old data
+	}
+	catch (...) {
+		Msg("Level data empty: %s", temp);
+	}
+	Render->level_Load			(LL_Stream);
+
+	// Objects
+	g_pGamePersistent->Environment().mods_load	();
+	R_ASSERT					(Load_GameSpecific_Before());
+	Objects.Load				();
+
+	// Done
+	FS.r_close					( LL_Stream );
+	bReady						= true;
+
+	if (!g_dedicated_server) {
+		IR_Capture();
+
+		Device.seqRender.Add(this);
+	}
+
+	Device.seqFrame.Add			(this);
+	return true;	
+}
+
+int		psNET_DedicatedSleep	= 5;
+void	IGame_Level::OnRender		( ) 
+{
+	if (!g_dedicated_server) {
+		{
+			PROF_EVENT("IGame_Level::OnRender: Calculate");
+			Render->Calculate();
+		}
+		{
+			PROF_EVENT("IGame_Level::OnRender: Render");
+			Render->Render();
+		}
+	}
+}
+
+
+void IGame_Level::OnFrame()
+{
+	PROF_EVENT("IGame_Level::OnFrame");
+
+	VERIFY(bReady);
+
+	if (IAnimNotifyHandler::IsValid())
+	{
+		IAnimNotifyHandler::Get().Update();
+	}
+
+	std::erase_if(scheduled_tasks, [&](const ScheduledCallbackItem& item)
+	{
+		if (Device.dwTimeGlobal >= item.execution_time)
+		{
+			item.task();
+			return true;
+		}
+		return false; 
+	});
+
+	Objects.Update(false);
+	g_hud->OnFrame();
+
+	// Ambience
+	if (!Sounds_Random.empty() && Device.dwTimeGlobal > Sounds_Random_dwNextTime)
+	{
+		Sounds_Random_dwNextTime = Device.dwTimeGlobal + Random.randI(10000, 20000);
+		Fvector pos;
+		pos.random_dir().normalize().mul(Random.randF(30, 100)).add(Device.vCameraPosition);
+		int id = Random.randI(Sounds_Random.size());
+		if (Sounds_Random_Enabled)
+		{
+			Sounds_Random[id].play_at_pos(nullptr, pos, 0);
+			Sounds_Random[id].set_volume(1.f);
+			Sounds_Random[id].set_range(10, 200);
+		}
+	}
+}
+// ==================================================================================================
+
+void CServerInfo::AddItem( const char* name_, const char* value_, u32 color_ )
+{
+	shared_str s_name( name_ );
+	AddItem( s_name, value_, color_ );
+}
+
+void CServerInfo::AddItem( shared_str& name_, const char* value_, u32 color_ )
+{
+	SItem_ServerInfo it;
+	//	shared_str s_name = CStringTable().translate( name_ );
+
+	//	xr_strcpy( it.name, s_name.c_str() );
+	xr_strcpy( it.name, name_.c_str() );
+	xr_strcat( it.name, " = " );
+	xr_strcat( it.name, value_ );
+	it.color = color_;
+
+	if ( data.size() < max_item )
+	{
+		data.push_back( it );
+	}
+}
+
+void IGame_Level::SetEntity( CObject* O  )
+{
+	if (pCurrentEntity)
+		pCurrentEntity->On_LostEntity();
+	
+	if (O)
+		O->On_SetEntity();
+
+	pCurrentEntity=pCurrentViewEntity=O;
+}
+
+void IGame_Level::SetViewEntity( CObject* O  )
+{
+	if (pCurrentViewEntity)
+		pCurrentViewEntity->On_LostEntity();
+
+	if (O)
+		O->On_SetEntity();
+
+	pCurrentViewEntity=O;
+}
+
+void IGame_Level::SoundEvent_Register( ref_sound_data_ptr S, float range )
+{
+	PROF_EVENT("IGame_Level::SoundEvent_Register");
+	if (!g_bLoaded) return;
+	if (!S) return;
+	if (S->g_object && S->g_object->getDestroy()) {S->g_object=nullptr; return;}
+	if (0u==S->slot) return;
+
+	clamp(range,0.1f,500.f);
+
+	CSound_params p = S->get_params();
+	Fvector snd_position = p.position;
+	if(S->is_2d())
+		snd_position.add(Sound->listener_position());
+
+	VERIFY(_valid(range) );
+	range = std::min(range,p.max_ai_distance);
+	if (S->g_type != int(0xffffffff) && (S->g_type & SOUND_TYPE_SUPPRESSED)) range *= .3f;
+	VERIFY(_valid(snd_position));
+	VERIFY(_valid(p.max_ai_distance));
+	VERIFY(_valid(p.volume));
+
+	// Monster distance hearing must not be clipped by asset range or occlusion.
+	const float QueryRange = EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation] ? 500.f : range;
+	g_SpatialSpace->q_box(snd_ER, 0, ESPATIAL_TYPE::REACTTOSOUND, snd_position, { QueryRange,QueryRange,QueryRange });
+
+	// Iterate
+	for (auto& spatial : snd_ER)
+	{
+		Feel::Sound* L = spatial->dcast_FeelSound();
+		if (0==L) continue;
+		CObject* CO = spatial->dcast_CObject();
+		VERIFY(CO);
+		if (CO->getDestroy()) continue;
+
+		// Energy and signal
+		VERIFY(_valid(spatial->sphere.P));
+		float dist = snd_position.distance_to(spatial->sphere.P);
+		const u64 TraceEventId = CO == CurrentEntity() ? 0 : g_AudioAiTrace.TakeDelivery(CO->ID());
+		const auto TraceDeliveryLambda = [&](const char* Reason, float Power, float Occlusion, float HearingFactor)
+		{
+			if (TraceEventId)
+			{
+				Msg("* [LIMINAL_AI_TRACE] phase=register event=%llu time=%u source=%u listener=%u type=%x reason=%s distance=%.3f range=%.3f asset_range=%.3f hearing_factor=%.3f volume=%.4f occlusion=%.4f power=%.5f position=(%.3f %.3f %.3f)",
+					(unsigned long long)TraceEventId,
+					Device.dwTimeGlobal,
+					S->g_object ? S->g_object->ID() : u16(-1),
+					CO->ID(),
+					S->g_type,
+					Reason,
+					dist,
+					range,
+					p.max_ai_distance,
+					HearingFactor,
+					p.volume,
+					Occlusion,
+					Power,
+					snd_position.x,
+					snd_position.y,
+					snd_position.z);
+			}
+		};
+		const float DistanceRange = L->GetDistanceSoundRange(S->g_type);
+		if (DistanceRange >= 0.f)
+		{
+			const float HearingFactor = std::clamp(L->GetHearingRangeFactor(), 0.f, 1.f);
+			if (DistanceRange > 0.f && HearingFactor > 0.f && dist <= DistanceRange * HearingFactor)
+			{
+				snd_Events.push_back({L, S, 1.f, snd_position, TraceEventId});
+				TraceDeliveryLambda("queued_distance_rule", 1.f, -1.f, HearingFactor);
+			}
+			else
+			{
+				TraceDeliveryLambda("rejected_distance_rule", 0.f, -1.f, HearingFactor);
+			}
+			continue;
+		}
+		if (S->g_type != int(0xffffffff) && (S->g_type & SOUND_TYPE_MELEE))
+		{
+			TraceDeliveryLambda("rejected_melee", 0.f, -1.f, -1.f);
+			continue;
+		}
+		if (dist > p.max_ai_distance)
+		{
+			TraceDeliveryLambda("rejected_asset_distance", 0.f, -1.f, -1.f);
+			continue;
+		}
+		const float HearingFactor = std::clamp(L->GetHearingRangeFactor(), 0.f, 1.f);
+		if (HearingFactor <= 0.f || dist > range * HearingFactor)
+		{
+			TraceDeliveryLambda("rejected_hearing_range", 0.f, -1.f, HearingFactor);
+			continue;
+		}
+		VERIFY(_valid(dist));
+		float Power = (1.f-dist/p.max_ai_distance)*p.volume;
+		VERIFY(_valid(Power));
+		if (Power>EPS_S)
+		{
+			float occ = Sound->get_occlusion_to(spatial->sphere.P,snd_position);
+			VERIFY(_valid(occ));
+			Power *= occ;
+			if (Power>EPS_S)
+			{
+				snd_Events.push_back({L, S, Power, snd_position, TraceEventId});
+			}
+			TraceDeliveryLambda(Power > EPS_S ? "queued_native_occlusion" : "rejected_occlusion_power", Power, occ, HearingFactor);
+		}
+		else
+		{
+			TraceDeliveryLambda("rejected_distance_power", Power, -1.f, HearingFactor);
+		}
+	}
+}
+
+void IGame_Level::SoundEvent_Dispatch()
+{
+	PROF_EVENT("IGame_Level::SoundEvent_Dispatch");
+	for(_esound_delegate& D : snd_Events)
+	{
+		VERIFY(D.dest && D.source);
+		if (D.TraceEventId)
+		{
+			Msg("* [LIMINAL_AI_TRACE] phase=dispatch event=%llu time=%u source=%u listener=%u reason=%s power=%.5f",
+				(unsigned long long)D.TraceEventId,
+				Device.dwTimeGlobal,
+				D.source->g_object ? D.source->g_object->ID() : u16(-1),
+				u16(D.TraceEventId),
+				D.source->slot ? "delivered" : "source_slot_stopped",
+				D.power);
+		}
+		if (D.source->slot)
+		{
+			const AudioAiTraceContext PreviousContext = g_AudioAiTraceContext;
+			g_AudioAiTraceContext = {D.TraceEventId, D.dest, D.source->g_object};
+			D.dest->feel_sound_new
+			(
+				D.source->g_object, 
+				D.source->g_type, 
+				D.source->g_userdata, 
+				D.Position,
+				D.power
+			);
+			g_AudioAiTraceContext = PreviousContext;
+		}
+	}
+
+	snd_Events.clear();
+}
+
+// Lain: added
+void   IGame_Level::SoundEvent_OnDestDestroy (Feel::Sound* obj)
+{
+	PROF_EVENT("IGame_Level::SoundEvent_OnDestDestroy");
+	for (const auto& Event : snd_Events)
+	{
+		if (Event.dest == obj && Event.TraceEventId)
+		{
+			Msg("* [LIMINAL_AI_TRACE] phase=dispatch event=%llu time=%u listener=%u reason=listener_destroyed_before_dispatch",
+				(unsigned long long)Event.TraceEventId,
+				Device.dwTimeGlobal,
+				u16(Event.TraceEventId));
+		}
+	}
+	if(!snd_Events.empty())
+		snd_Events.erase(std::remove_if(snd_Events.begin(), snd_Events.end(), [obj](const _esound_delegate& d) {return d.dest == obj; }), snd_Events.end() );
+}
+
+void   IGame_Level::SoundEvent_net_Relcase(CObject* obj)
+{
+	PROF_EVENT("IGame_Level::SoundEvent_net_Relcase");
+	for (const auto& Event : snd_Events)
+	{
+		if (Event.source->g_object == obj && Event.TraceEventId)
+		{
+			Msg("* [LIMINAL_AI_TRACE] phase=dispatch event=%llu time=%u source=%u listener=%u reason=source_released_before_dispatch",
+				(unsigned long long)Event.TraceEventId,
+				Device.dwTimeGlobal,
+				obj->ID(),
+				u16(Event.TraceEventId));
+		}
+	}
+	if (!snd_Events.empty())
+		snd_Events.erase(std::remove_if(snd_Events.begin(), snd_Events.end(), [obj](const _esound_delegate& d) {return d.source->g_object == obj; }), snd_Events.end());
+}

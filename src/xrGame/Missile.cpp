@@ -1,0 +1,1187 @@
+#include "StdAfx.h"
+#include "Missile.h"
+//.#include "WeaponHUD.h"
+#include "../xrPhysics/PhysicsShell.h"
+#include "Actor.h"
+#include "../xrEngine/CameraBase.h"
+#include "xrServer_Objects_ALife.h"
+#include "ActorEffector.h"
+#include "Level.h"
+#include "../Include/xrRender/Kinematics.h"
+#include "ai_object_location.h"
+#include "../xrPhysics/MathUtils.h"
+#include "CharacterPhysicsSupport.h"
+#include "Inventory.h"
+#include "InventoryWeaponSlotLayout.h"
+#include "../xrEngine/IGame_Persistent.h"
+#include "../xrSound/ai_sounds.h"
+#include "Grenade.h"
+#ifdef DEBUG
+#	include "PHDebug.h"
+#endif
+
+#define PLAYING_ANIM_TIME 10000
+
+#include "../../xrUI/Widgets/UIProgressShape.h"
+#include "../../xrUI/UIXmlInit.h"
+#include "PhysicsShellHolder.h"
+#include "SaveObjectHelpers.h"
+
+CUIProgressShape* g_MissileForceShape = nullptr;
+
+void create_force_progress()
+{
+	VERIFY							(!g_MissileForceShape);
+	CUIXml uiXml;
+	uiXml.Load						(CONFIG_PATH, UI_PATH, "grenade.xml");
+
+
+	CUIXmlInit						xml_init;
+	g_MissileForceShape				= new CUIProgressShape();
+	xml_init.InitProgressShape		(uiXml, "progress", 0, g_MissileForceShape);
+}
+
+void CMissile::reinit		()
+{
+	inherited::reinit	();
+	m_throw				= false;
+	m_constpower = false;
+	m_fThrowForce		= 0;
+	m_dwDestroyTime		= 0xffffffff;
+	SetPending			(false);
+	m_fake_missile		= nullptr;
+	SetState			( eHidden );
+}
+
+void CMissile::Load(const char* section)
+{
+	inherited::Load(section);
+
+	pSettings->read_if_exists<bool>(m_bUseAltThrow, section, "use_alt_throw");
+	pSettings->read_if_exists<bool>(m_bUseHudPosition, section, "use_hud_position");
+
+	if (!m_bUseAltThrow)
+	{
+		m_fConstForce = pSettings->r_float(section, "force_const");
+		m_fForceGrowSpeed = pSettings->r_float(section, "force_grow_speed");
+	}
+
+	m_fMinForce = pSettings->r_float(section, "force_min");
+	m_fMaxForce = pSettings->r_float(section, "force_max");
+
+	m_dwDestroyTimeMax = pSettings->r_u32(section, "destroy_time");
+
+	m_vThrowPoint = pSettings->r_fvector3(section, "throw_point");
+	m_vThrowDir = pSettings->r_fvector3(section, "throw_dir");
+
+	m_ef_weapon_type	= READ_IF_EXISTS(pSettings,r_u32,section,"ef_weapon_type",u32(-1));
+
+	SuicideFailDestroyTime = pSettings->read_if_exists<u32>(section, "suicide_fail_destroy_time", 700);
+	SuicideFailForce = pSettings->read_if_exists<float>(section, "suicide_fail_force", 20.0f);
+	SuicideReadyForce = pSettings->read_if_exists<float>(section, "suicide_ready_force", 8.0f);
+	ControllerGAttackMinDist = pSettings->read_if_exists<float>(section, "controller_g_attack_min_dist", 10.0f);
+
+	if (pSettings->line_exist(section, "checkout_bones"))
+	{
+		m_sCheckoutBones.clear();
+		const char* lineStr = pSettings->r_string(section, "checkout_bones");
+		for (int j = 0, cnt = _GetItemCount(lineStr); j < cnt; ++j)
+		{
+			string128 bone_name;
+			_GetItem(lineStr, j, bone_name);
+			m_sCheckoutBones.push_back(bone_name);
+		}
+	}
+}
+
+void CMissile::LoadSounds(const char* section)
+{
+	inherited::LoadSounds(section);
+
+	if (pSettings->line_exist(section, "snd_draw"))
+	{
+		m_eSoundsFlags.set(ESoundsFlags::sf_draw, true);
+		m_sounds.LoadSound(section, "snd_draw", "SndShow", false, ESoundTypes(SOUND_TYPE_ITEM_TAKING));
+	}
+
+	if (pSettings->line_exist(section, "snd_holster"))
+	{
+		m_eSoundsFlags.set(ESoundsFlags::sf_holster, true);
+		m_sounds.LoadSound(section, "snd_holster", "SndHide", false, ESoundTypes(SOUND_TYPE_ITEM_HIDING));
+	}
+
+	if (pSettings->line_exist(section, "snd_throw_begin"))
+	{
+		m_eSoundsFlags.set(ESoundsFlags::sf_throw_begin, true);
+		m_sounds.LoadSound(section, "snd_throw_begin", "sndThrowBegin", false, ESoundTypes(SOUND_TYPE_ITEM_TAKING));
+	}
+
+	if (pSettings->line_exist(section, "snd_throw"))
+	{
+		m_eSoundsFlags.set(ESoundsFlags::sf_throw, true);
+		m_sounds.LoadSound(section, "snd_throw", "sndThrow", false, ESoundTypes(SOUND_TYPE_ITEM_HIDING));
+
+		if (pSettings->line_exist(section, "snd_throw_low"))
+		{
+			m_sounds.LoadSound(section, "snd_throw_low", "sndThrowLow", false, ESoundTypes(SOUND_TYPE_ITEM_HIDING));
+		}
+	}
+
+	if (pSettings->line_exist(section, "snd_throw_cancel"))
+	{
+		m_eSoundsFlags.set(ESoundsFlags::sf_throw_cancel, true);
+		m_sounds.LoadSound(section, "snd_throw_cancel", "sndThrowCancel", false, ESoundTypes(SOUND_TYPE_ITEM_HIDING));
+		if (pSettings->line_exist(section, "snd_throw_cancel_low"))
+		{
+			m_sounds.LoadSound(section, "snd_throw_cancel_low", "sndThrowCancelLow", false, ESoundTypes(SOUND_TYPE_ITEM_HIDING));
+		}
+	}
+
+	if (pSettings->line_exist(section, "snd_suicide_begin"))
+	{
+		m_sounds.LoadSound(section, "snd_suicide_begin", "sndSuicideBegin", true, ESoundTypes(SOUND_TYPE_ITEM_HIDING));
+	}
+
+	if (pSettings->line_exist(section, "snd_suicide_stop"))
+	{
+		m_sounds.LoadSound(section, "snd_suicide_stop", "sndSuicideStop", true, ESoundTypes(SOUND_TYPE_ITEM_HIDING));
+	}
+}
+
+bool CMissile::net_Spawn(CSE_Abstract* DC) 
+{
+	bool l_res = inherited::net_Spawn(DC);
+
+	dwXF_Frame					= 0xffffffff;
+
+	m_throw_direction.set(0.0f, 1.0f, 0.0f);
+	m_throw_matrix.identity();
+	SpatialComponent->type |= ESPATIAL_TYPE::MISSILE;
+	return l_res;
+}
+
+void CMissile::net_Destroy() 
+{
+	inherited::net_Destroy();
+	m_fake_missile = 0;
+	m_dwStateTime		= 0;
+}
+
+void CMissile::PH_A_CrPr		()
+{
+	if (m_just_after_spawn)
+	{
+		CPhysicsShellHolder& obj = CInventoryItem::object();
+		VERIFY(obj.Visual());
+		IKinematics *K = obj.Visual()->dcast_PKinematics();
+		VERIFY( K );
+		if (!obj.PPhysicsShell())
+		{
+			Msg("! ERROR: PhysicsShell is nullptr, object [%s][%d]", obj.cName().c_str(), obj.ID());
+			return;
+		}
+		if(!obj.PPhysicsShell()->isFullActive())
+		{
+			K->CalculateBones_Invalidate();
+			K->CalculateBones(true);
+		}
+		obj.PPhysicsShell()->GetGlobalTransformDynamic(&obj.XFORM());
+		K->CalculateBones_Invalidate();
+		K->CalculateBones(true);
+		obj.spatial_move();
+		m_just_after_spawn = false;
+	}
+}
+
+void CMissile::OnActiveItem		()
+{
+	SwitchState				(eShowing);
+	inherited::OnActiveItem	();
+	SetState				(eIdle);
+	SetNextState			(eIdle);	
+}
+
+void CMissile::OnHiddenItem()
+{
+
+//. -Hide
+	if(IsGameTypeSingle())
+		SwitchState			(eHiding);
+	else
+		SwitchState			(eHidden);
+//-
+
+	inherited::OnHiddenItem	();
+	SetState				(eHidden);
+	SetNextState			(eHidden);
+}
+
+
+void CMissile::spawn_fake_missile()
+{
+	if (OnClient()) return;
+
+	if (!getDestroy())
+	{
+		CSE_Abstract		*object = Level().spawn_item(
+			*cNameSect(),
+			Position(),
+			(g_dedicated_server)?u32(-1):ai_location().level_vertex_id(),
+			ID(),
+			true
+		);
+
+		CSE_ALifeObject* alife_object = object->cast_alife_object();
+		VERIFY						(alife_object);
+		alife_object->m_flags.set	(CSE_ALifeObject::flCanSave,false);
+
+		NET_Packet			P;
+		if (EngineExternal()[EEngineExternalSystem::AdvancedSerialization])
+		{
+			SaveObjectNetPacketHelper::PrepareLocalSpawnPacket(P, *object);
+		}
+		else
+		{
+			object->Spawn_Write	(P,true);
+		}
+		Level().Send		(P,net_flags(true));
+		F_entity_Destroy	(object);
+	}
+}
+
+void CMissile::OnH_A_Chield() 
+{
+	inherited::OnH_A_Chield();
+}
+
+
+void CMissile::OnH_B_Independent(bool just_before_destroy) 
+{
+	inherited::OnH_B_Independent(just_before_destroy);
+
+	if (!just_before_destroy) 
+	{
+		VERIFY								(PPhysicsShell());
+		PPhysicsShell()->SetAirResistance	(0.f, 0.f);
+		PPhysicsShell()->set_DynamicScales	(1.f, 1.f);
+
+		if(GetState() == eThrow)
+		{
+			Throw				();
+		}
+	}
+
+	if(!m_dwDestroyTime && Local()) 
+	{
+		DestroyObject		();
+		return;
+	}
+}
+
+extern u32 hud_adj_mode;
+
+void CMissile::UpdateCL() 
+{
+	m_dwStateTime += Device.dwTimeDelta;
+
+	inherited::UpdateCL();
+
+	if (AllowBore())
+	{
+		CActor* pActor = H_Parent() ? H_Parent()->cast_actor() : NULL;
+		if (pActor && !pActor->AnyMove() && this == pActor->inventory().ActiveItem())
+		{
+			if (hud_adj_mode == 0 && GetState() == eIdle && (Device.dwTimeGlobal - m_dw_curr_substate_time > 20000))
+			{
+				SwitchState(eBore);
+				ResetSubStateTime();
+			}
+		}
+	}
+
+	if (GetState() == eReady)
+	{
+		if (m_throw)
+		{
+			SwitchState(eThrow);
+		}
+		else if (!m_bUseAltThrow)
+		{
+			if (CActor* actor = H_Parent() ? H_Parent()->cast_actor() : nullptr)
+			{
+				m_fThrowForce += (m_fForceGrowSpeed * Device.dwTimeDelta) * .001f;
+				clamp(m_fThrowForce, m_fMinForce, m_fMaxForce);
+			}
+		}
+	}
+
+	if (Device.dwFrame == dwUpdateSounds_Frame)
+		return;
+
+	dwUpdateSounds_Frame = Device.dwFrame;
+
+	Fvector P;
+	Center(P);
+
+	if (m_sounds.FindSoundItem("SndShow", false))
+		m_sounds.SetPosition("SndShow", P);
+
+	if (m_sounds.FindSoundItem("SndHide", false))
+		m_sounds.SetPosition("SndHide", P);
+
+	if (m_sounds.FindSoundItem("sndThrow", false))
+		m_sounds.SetPosition("sndThrow", P);
+
+	if (m_sounds.FindSoundItem("sndThrowBegin", false))
+		m_sounds.SetPosition("sndThrowBegin", P);
+}
+
+void CMissile::shedule_Update(u32 dt)
+{
+	inherited::shedule_Update(dt);
+	if(!H_Parent() && getVisible() && m_pPhysicsShell) 
+	{
+		if(m_dwDestroyTime <= Level().timeServer()) 
+		{
+			m_dwDestroyTime = 0xffffffff;
+			VERIFY	(!m_pInventory);
+			Destroy	();
+			return;
+		}
+	}
+}
+
+void CMissile::State(u8 state)
+{
+	switch (GetState())
+	{
+		case eShowing:
+		{
+			SetPending(true);
+
+			PlayHUDMotion("anm_show", EHudMixType::eNoMix, GetState(), m_disable_random_animations);
+
+			if (m_eSoundsFlags.test(ESoundsFlags::sf_draw))
+			{
+				PlaySound("SndShow", Position());
+			}
+		}
+		break;
+		case eIdle:
+		{
+			SetPending(false);
+			PlayAnimIdle();
+		}
+		break;
+		case eHiding:
+		{
+			if (H_Parent())
+			{
+				PlayHUDMotion("anm_hide", EHudMixType::eMixAll, GetState(), m_disable_random_animations);
+				SetPending(true);
+				if (m_eSoundsFlags.test(ESoundsFlags::sf_holster))
+				{
+					PlaySound("SndHide", Position());
+				}
+			}
+		}
+		break;
+		case eHidden:
+		{
+			StopCurrentAnimWithoutCallback();
+
+			if (H_Parent())
+			{
+				setVisible(false);
+				setEnabled(false);
+			};
+
+			SetPending(false);
+		}
+		break;
+		case eThrowCancel:
+		{
+			SetPending(true);
+			PlayHUDMotion((!m_bUseAltThrow || m_constpower) ? "anm_throw_cancel" : "anm_throw_cancel_low", EHudMixType::eMixAll, GetState());
+
+			if (m_eSoundsFlags.test(ESoundsFlags::sf_throw_cancel))
+			{
+				PlaySound((!m_bUseAltThrow || m_constpower) ? "sndThrowCancel" : "sndThrowCancelLow", Position());
+			}
+
+			m_constpower = false;
+
+			break;
+		}
+		case eThrowStart:
+		{
+			SetPending(true);
+
+			if (Actor() == H_Parent() && Actor()->ControlledTimeRemains > 0)
+			{
+				PlayHUDMotion("anm_suicide_begin", EHudMixType::eMixAll, GetState());
+				PlaySound("sndSuicideBegin", Position());
+				m_constpower = true;
+				m_throw = false;
+				SuicideThrow = true;
+			}
+			else
+			{
+				m_fThrowForce = m_fMinForce;
+				if (m_eSoundsFlags.test(ESoundsFlags::sf_throw_begin))
+				{
+					PlaySound("sndThrowBegin", Position());
+				}
+
+				PlayHUDMotion((!m_bUseAltThrow || m_constpower) ? "anm_throw_begin" : "anm_throw_begin_low", EHudMixType::eMixAll, GetState(), m_disable_random_animations);
+
+				if (CActor* actor = H_Parent() != nullptr ? H_Parent()->cast_actor() : nullptr)
+				{
+					if (CCustomDevice* dev = actor->GetDevice())
+					{
+						if (dev->CanThrowHand())
+						{
+							dev->SwitchState(CCustomDevice::EDeviceStates::eHandThrowStart);
+						}
+					}
+				}
+			}
+		}
+		break;
+		case eReady:
+		{
+			PlayHUDMotion((!m_bUseAltThrow || m_constpower) ? "anm_throw_idle" : "anm_throw_idle_low", EHudMixType::eMixAll, GetState(), m_disable_random_animations);
+		}
+		break;
+		case eThrow:
+		{
+			SetPending(true);
+			m_throw = false;
+
+			if (Actor() == H_Parent() && SuicideThrow)
+			{
+				Actor()->NotifySuicideStopCallbackIfNeeded();
+				set_destroy_time_max(SuicideFailDestroyTime);
+				PrepareGrenadeForSuicideThrow(SuicideFailForce);
+
+				PlayHUDMotion("anm_suicide_stop", EHudMixType::eMixAll, GetState());
+				PlaySound("sndSuicideStop", Position());
+			}
+			else
+			{
+				if (m_eSoundsFlags.test(ESoundsFlags::sf_throw))
+				{
+					PlaySound((!m_bUseAltThrow || m_constpower) ? "sndThrow" : "sndThrowLow", Position());
+				}
+
+				PlayHUDMotion((!m_bUseAltThrow || m_constpower) ? "anm_throw" : "anm_throw_low", "anm_throw_act", EHudMixType::eMixAll, GetState(), m_disable_random_animations);
+				m_motion_marks_available = m_current_motion_def ? !m_current_motion_def->marks.empty() : false;
+
+				if (CActor* actor = H_Parent() != nullptr ? H_Parent()->cast_actor() : nullptr)
+				{
+					if (CCustomDevice* dev = actor->GetDevice())
+					{
+						if (dev->CanThrowHand())
+						{
+							dev->SwitchState(CCustomDevice::EDeviceStates::eHandThrowEnd);
+						}
+					}
+				}
+			}
+		}
+		break;
+		case eThrowEnd:
+		{
+			if (!m_motion_marks_available)
+			{
+				PlayHUDMotion("anm_throw_end", EHudMixType::eMixAll, GetState(), m_disable_random_animations);
+			}
+			SwitchState(eShowing);
+		}
+		break;
+	}
+}
+
+void CMissile::OnStateSwitch	(u8 S)
+{
+	m_dwStateTime				= 0;
+	inherited::OnStateSwitch	(S);
+	State						(S);
+}
+
+void CMissile::OnAnimationEnd(u8 state)
+{
+	if (SuicideThrow && Actor()->ControlledTimeRemains > 0)
+	{
+		Actor()->NotifySuicideShotCallbackIfNeeded();
+		m_dwDestroyTime = 0xffffffff;
+		cast_grenade()->SetInitiator(H_Parent()->ID());
+		XFORM().set(HudItemData()->m_item_transform);
+		Destroy();
+		return;
+	}
+
+	switch (state)
+	{
+		case eHiding:
+		{
+			setVisible(false);
+			SwitchState(eHidden);
+		}
+		break;
+		case eShowing:
+		{
+			setVisible(true);
+			SwitchState(eIdle);
+		}
+		break;
+		case eThrowStart:
+		{
+			if (H_Parent() && !m_fake_missile && !H_Parent()->cast_missile())
+			{
+				spawn_fake_missile();
+			}
+
+			if (m_throw)
+			{
+				SwitchState(eThrow);
+			}
+			else
+			{
+				SwitchState(eReady);
+			}
+		}
+		break;
+		case eThrow:
+		{
+			SwitchState(eThrowEnd);
+			if (!m_motion_marks_available && !m_throw)
+			{
+				if (H_Parent())
+				{
+					Throw();
+				}
+			}
+		}
+		break;
+		case eThrowEnd:
+		{
+			SwitchState(eShowing);
+		}
+		break;
+		case eThrowCancel:
+		{
+			SwitchState(eIdle);
+			break;
+		}
+		default:
+		{
+			inherited::OnAnimationEnd(state);
+		}
+	}
+}
+
+void CMissile::UpdatePosition(const Fmatrix& trans)
+{
+	XFORM().mul		(trans,offset());
+}
+
+void CMissile::UpdateXForm	()
+{
+	if (Device.dwFrame!=dwXF_Frame)
+	{
+		dwXF_Frame			= Device.dwFrame;
+
+		if (!H_Parent())	return;
+
+		// Get access to entity and its visual
+		CGameObject* GO = H_Parent()->cast_game_object(); if (!GO || GO->cast_trader()) return;
+		CEntityAlive* E = GO->cast_entity_alive(); if(!E) return;
+		CInventoryOwner	*IO = GO->cast_inventory_owner();
+
+		if (IO->attached(this))
+			return;
+
+		IKinematics* V = PKinematics(E->Visual());
+
+		// Get matrices
+		u16					boneL = BI_NONE, boneR = BI_NONE, boneR2 = BI_NONE;
+		E->g_WeaponBones	(boneL,boneR,boneR2);
+		if (boneR == BI_NONE)	return;
+
+
+		boneL = boneR2;
+
+		Fmatrix mL, mR;
+		if (GO->cast_actor())
+		{
+			V->Bone_GetAnimPos(mL, boneL, u8(-1), false);
+			V->Bone_GetAnimPos(mR, boneR, u8(-1), false);
+		}
+		else
+		{
+			// V->CalculateBones();
+			mL = V->LL_GetTransform(boneL);
+			mR = V->LL_GetTransform(boneR);
+		}
+
+		// Calculate
+		Fmatrix				mRes;
+		Fvector				R,D,N;
+		D.sub				(mL.c,mR.c);	D.normalize_safe();
+		R.crossproduct		(mR.j,D);		R.normalize_safe();
+		N.crossproduct		(D,R);			N.normalize_safe();
+		mRes.set			(R,N,D,mR.c);
+		mRes.mulA_43		(E->XFORM());
+		UpdatePosition		(mRes);
+	}
+}
+
+void CMissile::setup_throw_params(bool bForce = false)
+{
+	if (!H_Parent()) return;
+	CGameObject* GO = H_Parent()->cast_game_object();
+	if (!GO || GO->getDestroy()) return;
+	CEntity					*entity = GO->cast_entity();
+	if (!entity) return;
+	CInventoryOwner			*inventory_owner = entity->cast_inventory_owner();
+	if (!inventory_owner || !inventory_owner->m_inventory) return;
+	Fmatrix					trans;
+	trans.identity			();
+	Fvector					FirePos, FireDir;
+	if (this == inventory_owner->inventory().ActiveItem() || bForce)
+	{
+		entity->g_fireParams(this, FirePos, FireDir);
+	}
+	else
+	{
+		FirePos				= XFORM().c;
+		FireDir				= XFORM().k;
+	}
+	trans.k.set				(FireDir);
+	Fvector::generate_orthonormal_basis(trans.k, trans.j,trans.i);
+	trans.c.set				(FirePos);
+	m_throw_matrix.set		(trans);
+	m_throw_direction.set	(trans.k);
+	Fmatrix FinalItem;
+	if (g_player_hud && g_player_hud->HumanoidItemPose(this, FinalItem))
+	{
+		m_throw_matrix.c = FinalItem.c;
+		Fvector Intent = FinalItem.k;
+		if (CActor* Owner = H_Parent()->cast_actor())
+		{
+			// Item axes may include authored spin; use the independent held direction.
+			const Fmatrix& Hands = g_player_hud->GetTransform();
+			Intent = Hands.k;
+		}
+		m_throw_direction = Intent.normalize_safe();
+		m_throw_matrix.k = m_throw_direction;
+		Fvector::generate_orthonormal_basis(m_throw_matrix.k, m_throw_matrix.j, m_throw_matrix.i);
+	}
+}
+
+void CMissile::OnMotionMark(u8 state, const motion_marks& M)
+{
+	inherited::OnMotionMark(state, M);
+	if (state == eThrow && !m_throw)
+	{
+		if (H_Parent())
+		{
+			Throw();
+		}
+	}
+}
+
+void CMissile::Throw() 
+{
+	if (!H_Parent()) 
+		return;
+
+	CActor* pActor = H_Parent()->cast_actor();
+
+	if (pActor && pActor == Level().CurrentControlEntity() || Local())
+	{
+		VERIFY(H_Parent()->cast_entity());
+		setup_throw_params(IsHidden() && GetHUDmode());
+
+		if (m_bUseHudPosition && GetHUDmode() && !IsHidden())
+		{
+			attachable_hud_item* HID = HudItemData();
+			auto Animator = g_player_hud->GetAnimator();
+
+			if (HID || Animator)
+			{
+				m_throw_matrix.set(HID ? HID->m_item_transform : Animator && Animator->m_item ? Animator->m_item_transform : Fidentity);
+
+				Fvector cam_pos = Device.vCameraPosition;
+				Fvector throw_pos = m_throw_matrix.c;
+				Fvector dir = Fvector().set(throw_pos).sub(cam_pos);
+				float dist = dir.magnitude();
+				if (dist > EPS)
+				{
+					dir.normalize();
+					collide::rq_result RQ;
+					if (g_pGameLevel->ObjectSpace.RayPick(cam_pos, dir, dist, collide::rqtBoth, RQ, H_Parent()))
+					{
+						m_throw_matrix.c.sub(dir.mul(dist - RQ.range + 0.01f));
+					}
+				}
+			}
+		}
+
+		m_fake_missile->m_throw_direction = m_throw_direction;
+		m_fake_missile->m_throw_matrix = m_throw_matrix;
+
+		CInventoryOwner* inventory_owner = H_Parent()->cast_inventory_owner();
+		VERIFY(inventory_owner);
+		if (inventory_owner->use_default_throw_force())
+		{
+			if (m_bUseAltThrow)
+			{
+				m_fake_missile->m_fThrowForce = m_constpower ? m_fMaxForce : m_fMinForce;
+			}
+			else
+			{
+				m_fake_missile->m_fThrowForce = m_constpower ? m_fConstForce : m_fThrowForce;
+			}
+		}
+		else
+		{
+			m_fake_missile->m_fThrowForce = inventory_owner->missile_throw_force();
+		}
+
+		m_fThrowForce = m_fMinForce;
+	}
+
+	if (Local() && H_Parent())
+	{
+		NET_Packet P;
+		u_EventGen(P,GE_OWNERSHIP_REJECT,ID());
+		P << m_fake_missile->ID();
+		u_EventSend(P);
+	}
+}
+
+void CMissile::OnEvent(NET_Packet& P, u16 type) 
+{
+	ALife::_OBJECT_ID id;
+	switch (type)
+	{
+		case GE_OWNERSHIP_TAKE:
+		{
+			P >> id;
+			CObject* O = Level().Objects.net_Find(id); if(!O || O->getDestroy()) break;
+			CMissile *missile = O->cast_missile(); if(!missile) break;
+			m_fake_missile	= missile;
+			missile->H_SetParent(this);
+			missile->Position().set(Position());
+			break;
+		} 
+		case GE_OWNERSHIP_REJECT:
+		{
+			P >> id;
+			bool IsFakeMissile = false;
+			if (m_fake_missile && (id == m_fake_missile->ID()))
+			{
+				m_fake_missile = nullptr;
+				IsFakeMissile = true;
+			}
+
+			CObject* O = Level().Objects.net_Find(id);
+			if (!O || O->getDestroy())
+			{
+				break;
+			}
+			CMissile* missile = O->cast_missile();
+			if (!missile)
+			{
+				break;
+			}
+			missile->H_SetParent(nullptr, !P.r_eof() && P.r_u8());
+			missile->SetCanTake(false);
+			if (IsFakeMissile && OnClient())
+			{
+				missile->set_destroy_time(m_dwDestroyTimeMax);
+			}
+			break;
+		}
+		default:
+		{
+			inherited::OnEvent(P, type);
+		}
+		break;
+	}
+}
+
+void CMissile::Destroy() 
+{
+	if (Local())		DestroyObject();
+}
+
+bool CMissile::Action(u16 cmd, u32 flags)
+{
+	if (inherited::Action(cmd, flags))
+	{
+		return true;
+	}
+
+	switch (cmd)
+	{
+		case kWPN_FIRE:
+		case kWPN_ZOOM:
+		{
+			return ThrowAction(cmd, flags);
+			break;
+		}
+		case kWPN_RELOAD:
+		{
+			if (HudAnimationExist("anm_throw_cancel") && GetNextState() == eReady && !m_throw)
+			{
+				SwitchState(eThrowCancel);
+			}
+			break;
+		}
+	}
+
+	return false;
+}
+
+bool CMissile::ThrowAction(u16 cmd, u32 flags)
+{
+	const u8 NextState = GetNextState();
+
+	if (NextState == eHiding)
+	{
+		return false;
+	}
+
+	const bool IsConst = (cmd & kWPN_FIRE) != 0;
+
+	if (flags & CMD_START)
+	{
+		if (IsConst && !m_bUseAltThrow)
+		{
+			if (!IsPending() || NextState == eIdle)
+			{
+				m_constpower = true;
+				m_throw = true;
+				SwitchState(eThrowStart);
+				return true;
+			}
+		}
+		else
+		{
+			if (!m_bUseAltThrow || IsConst == m_constpower)
+			{
+				m_throw = false;
+			}
+
+			if (!IsPending() || NextState == eIdle)
+			{
+				m_constpower = IsConst;
+				SwitchState(eThrowStart);
+				return true;
+			}
+		}
+	}
+	else if ((!IsConst || m_bUseAltThrow) && (NextState == eReady || NextState == eThrowStart))
+	{
+		if (m_bUseAltThrow && m_constpower != IsConst)
+		{
+			return false;
+		}
+
+		m_throw = true;
+		if (NextState == eReady)
+		{
+			SwitchState(eThrow);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void  CMissile::UpdateFireDependencies_internal	()
+{
+	if (0==H_Parent())		return;
+
+    if (Device.dwFrame!=dwFP_Frame){
+		dwFP_Frame = Device.dwFrame;
+
+		UpdateXForm			();
+		
+		if (GetHUDmode() && !IsHidden())
+		{
+			R_ASSERT(0);  //implement this!!!
+/*
+			// 1st person view - skeletoned
+			CKinematics* V			= smart_cast<CKinematics*>(GetHUD()->Visual());
+			VERIFY					(V);
+			V->CalculateBones		();
+
+			// fire point&direction
+			Fmatrix& parent			= GetHUD()->Transform	();
+			m_throw_direction.set	(parent.k);
+*/
+		}else{
+			// 3rd person
+			Fmatrix& parent			= H_Parent()->XFORM();
+			m_throw_direction.set	(m_vThrowDir);
+			parent.transform_dir	(m_throw_direction);
+		}
+	}
+}
+
+void CMissile::activate_physic_shell()
+{
+	if (H_Parent() && !H_Parent()->cast_missile())
+	{
+		inherited::activate_physic_shell();
+		if(m_pPhysicsShell&&m_pPhysicsShell->isActive()&&!IsGameTypeSingle())
+		{
+				m_pPhysicsShell->add_ObjectContactCallback		(ExitContactCallback);
+				m_pPhysicsShell->set_CallbackData	(H_Root() != nullptr ? H_Root()->cast_physics_shell_holder() : nullptr);
+		}
+		return;
+	}
+
+	Fvector				l_vel;
+	l_vel.set			(m_throw_direction);
+	l_vel.normalize_safe();
+	l_vel.mul			(m_fThrowForce);
+
+	Fvector				a_vel;
+	CInventoryOwner		*inventory_owner = H_Root() ? H_Root()->cast_inventory_owner() : NULL;
+	if (inventory_owner && inventory_owner->use_throw_randomness()) {
+		float			fi,teta,r;
+		fi				= ::Random.randF(0.f,2.f*M_PI);
+		teta			= ::Random.randF(0.f,M_PI);
+		r				= ::Random.randF(2.f*M_PI,3.f*M_PI);
+		float			rxy = r* std::sin(teta);
+		a_vel.set		(rxy* std::cos(fi),rxy* std::sin(fi),r* std::cos(teta));
+	}
+	else
+		a_vel.set		(0.f,0.f,0.f);
+
+	XFORM().set			(m_throw_matrix);
+
+	CEntityAlive *entity_alive = H_Root()->cast_entity_alive();
+	if (entity_alive && entity_alive->character_physics_support())
+	{
+		Fvector			parent_vel_;
+		entity_alive->character_physics_support()->movement()->GetCharacterVelocity(parent_vel_);
+		l_vel.add		(parent_vel_);
+	}
+
+	R_ASSERT							(!m_pPhysicsShell);
+	create_physic_shell					();
+	m_pPhysicsShell->Activate			(m_throw_matrix, l_vel, a_vel);
+//	m_pPhysicsShell->AddTracedGeom		();
+	m_pPhysicsShell->SetAllGeomTraced	();
+	m_pPhysicsShell->add_ObjectContactCallback		(ExitContactCallback);
+	m_pPhysicsShell->set_CallbackData	(H_Root()->cast_game_object());
+//	m_pPhysicsShell->remove_ObjectContactCallback	(ExitContactCallback);
+	m_pPhysicsShell->SetAirResistance	(0.f,0.f);
+	m_pPhysicsShell->set_DynamicScales	(1.f,1.f);
+
+	IKinematics							*kinematics = PKinematics(Visual());
+	VERIFY								(kinematics);
+	kinematics->CalculateBones_Invalidate();
+	if (m_fThrowForce != 0.f&&!m_sCheckoutBones.empty())
+	{
+		u16 bone_id;
+		for (const auto& boneName : m_sCheckoutBones)
+		{
+			bone_id = kinematics->LL_BoneID(boneName);
+			if (bone_id != BI_NONE && kinematics->LL_GetBoneVisible(bone_id))
+				kinematics->LL_SetBoneVisible(bone_id, false, true);
+		}
+	}
+	kinematics->CalculateBones			(true);
+}
+void CMissile::net_Relcase(CObject* O)
+{
+	inherited::net_Relcase(O);
+
+	if (PPhysicsShell() != nullptr && PPhysicsShell()->isActive())
+	{
+		CPhysicsShellHolder* callback_data = (CPhysicsShellHolder*)PPhysicsShell()->get_CallbackData();
+		if (callback_data != nullptr && O == callback_data->dcast_CObject())
+		{
+			PPhysicsShell()->remove_ObjectContactCallback(ExitContactCallback);
+			PPhysicsShell()->set_CallbackData(nullptr);
+		}
+	}
+
+}
+
+void CMissile::create_physic_shell	()
+{
+	//create_box2sphere_physic_shell();
+	CInventoryItemObject::CreatePhysicsShell();
+}
+
+void CMissile::setup_physic_shell	()
+{
+	R_ASSERT(!m_pPhysicsShell);
+	create_physic_shell();
+	m_pPhysicsShell->Activate	(XFORM(),0,XFORM());//,true 
+	IKinematics					*kinematics = PKinematics(Visual());
+	R_ASSERT					(kinematics);
+	kinematics->CalculateBones_Invalidate();
+	kinematics->CalculateBones			(true);
+}
+
+u32	CMissile::ef_weapon_type		() const
+{
+	VERIFY	(m_ef_weapon_type != u32(-1));
+	return	(m_ef_weapon_type);
+}
+
+
+bool CMissile::render_item_ui_query()
+{
+	bool b_is_active_item = m_pInventory && m_pInventory->ActiveItem() && m_pInventory->ActiveItem() == this;
+	bool parent_actor = H_Parent() ? H_Parent()->cast_actor() : nullptr;
+	return b_is_active_item && !m_bUseAltThrow && (GetState() == eReady) && !m_throw && parent_actor;
+}
+
+void CMissile::render_item_ui()
+{
+	if (!H_Parent() || !H_Parent()->cast_actor())
+	{
+		return;
+	}
+
+	if (!g_MissileForceShape)
+	{
+		create_force_progress();
+	}
+
+	float k = (m_fThrowForce - m_fMinForce) / (m_fMaxForce - m_fMinForce);
+	g_MissileForceShape->SetPos(k);
+	g_MissileForceShape->Draw();
+}
+
+void CMissile::ExitContactCallback(bool& do_colide,bool bo1,dContact& c,SGameMtl * /*material_1*/,SGameMtl * /*material_2*/)
+{
+	dxGeomUserData	*gd1=nullptr,	*gd2=nullptr;
+	if(bo1)
+	{
+		gd1 =PHRetrieveGeomUserData(c.geom.g1);
+		gd2 =PHRetrieveGeomUserData(c.geom.g2);
+	}
+	else
+	{
+		gd2 =PHRetrieveGeomUserData(c.geom.g1);
+		gd1 =PHRetrieveGeomUserData(c.geom.g2);
+	}
+	if (gd1 && gd2 && (CPhysicsShellHolder*)gd1->callback_data == gd2->ph_ref_object)	
+	{
+		do_colide = false;
+	}
+
+	if (do_colide)
+	{
+		ExitContactCallback_Patch(c.geom.g2);
+		ExitContactCallback_Patch(c.geom.g1);
+	}
+}
+
+#include "Grenade.h"
+
+void CMissile::ExitContactCallback_Patch(dGeomID dxGeom)
+{
+	dxGeomUserData* geom_data = PHRetrieveGeomUserData(dxGeom);
+
+	if (geom_data == nullptr)
+	{
+		return;
+	}
+
+	CGrenade* grenade = smart_cast<CGrenade*>(geom_data->ph_ref_object);
+
+	if (grenade == nullptr)
+	{
+		return;
+	}
+
+	auto& contact_params = grenade->ContactParams();
+
+	u32 destroy_time = grenade->destroy_time();
+	u32 now = Device.dwTimeGlobal;
+
+	if (destroy_time == 0xffffffff || destroy_time <= now)
+	{
+		return;
+	}
+
+	u32 time_from_throw = grenade->destroy_time_max() - (destroy_time - now);
+
+	u32 safe_time = contact_params.SafeTime;
+	u32 delay_time = contact_params.DelayTime;
+
+	if (safe_time != 0 && safe_time > time_from_throw)
+	{
+		grenade->set_destroy_time_now(0xffffffff);
+	}
+	else if (delay_time != 0 && delay_time > time_from_throw)
+	{
+		// Просто пропускаем контакт
+	}
+	else if (contact_params.ExplosionOnKick)
+	{
+		u32 new_destroy_time = now;
+		float min_speed = contact_params.MinExplosionSpeed;
+		if (min_speed > 0.0f)
+		{
+			CPhysicsShellHolder* cpsh = grenade->cast_physics_shell_holder();
+			if (cpsh)
+			{
+				Fvector linear_vel = zero_vel;
+				cpsh->m_pPhysicsShell->get_LinearVel(linear_vel);
+				float speed = linear_vel.magnitude();
+				if (speed < min_speed)
+				{
+					if (contact_params.DeactivateOnLowSpeedContact)
+					{
+						new_destroy_time = 0xffffffff;
+					}
+					else
+					{
+						new_destroy_time = destroy_time;
+					}
+				}
+			}
+		}
+		grenade->set_destroy_time_now(0xffffffff);
+		grenade->Destroy();
+	}
+}
+
+bool CMissile::GetBriefInfo( II_BriefInfo& info )
+{
+	info.clear();
+	info.name._set( m_nameShort );
+	return true;
+}
+
+bool CMissile::NeedBlockSprint() const
+{
+	u8 state = GetState();
+	const static bool isDelayedWeaponActions = EngineExternal()[EEngineExternalGame::EnableDelayedWeaponActions];
+	if (isDelayedWeaponActions)
+	{
+		return state != eIdle && state != eSprintStart && state != eSprintEnd;
+	}
+
+	return false;//state == eSprintEnd;
+}
+
+void CMissile::PrepareGrenadeForSuicideThrow(float force)
+{
+	m_fMinForce = force;
+	m_fMaxForce = force;
+	m_fConstForce = force;
+}

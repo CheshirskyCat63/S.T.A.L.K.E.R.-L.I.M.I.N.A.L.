@@ -1,0 +1,109 @@
+#pragma once
+#include "WeaponMagazined.h"
+#include "RocketLauncher.h"
+
+
+class CWeaponFakeGrenade;
+
+
+class CWeaponMagazinedWGrenade : public CWeaponMagazined,
+								 public CRocketLauncher
+{
+	using inherited = CWeaponMagazined;
+public:
+	CWeaponMagazinedWGrenade() = default;
+	virtual	~CWeaponMagazinedWGrenade() = default;
+
+	virtual void Load(const char* section);
+	void ReloadConfig() override;
+	virtual void	LoadSounds			(const char* section) override;
+	
+	virtual bool	net_Spawn			(CSE_Abstract* DC);
+	virtual void	net_Destroy			();
+	virtual void	net_Export			(NET_Packet& P);
+	virtual void	net_Import			(NET_Packet& P);
+	
+	virtual void	OnH_B_Independent	(bool just_before_destroy);
+
+	virtual void	save				(NET_Packet &output_packet) override;
+	virtual void	load				(IReader &input_packet) override;
+	virtual void Serialize(ISaveObject& Object) override;
+
+
+	virtual bool	Attach					(PIItem pIItem);
+	virtual bool	Detach					(PIItem pIItem);
+	virtual bool	CanAttach				(PIItem pIItem);
+	virtual bool	CanDetach				(PIItem pIItem);
+	virtual void	InitAddons				();
+	virtual bool	UseScopeTexture			();
+	virtual	float	CurrentZoomFactor		();
+	virtual void	FireStart				();
+	virtual void	FireEnd					();
+			void	LaunchGrenade_Correct	(Fvector3* v);
+	
+	virtual void	OnStateSwitch	(u8 S);
+	
+	virtual void	switch2_Hiding() override;
+	virtual void	switch2_Showing() override;
+	virtual void	switch2_Reload() override;
+			void	switch2_SwitchMode();
+	virtual void	state_Fire		(float dt);
+	virtual void	OnEvent			(NET_Packet& P, u16 type);
+	virtual void	ReloadMagazine	();
+	virtual void	UnloadMagazine	(bool spawn_ammo = true);
+
+	virtual bool	Action			(u16 cmd, u32 flags);
+
+	virtual void	UpdateSounds	();
+
+	//переключение в режим подствольника
+	virtual bool	SwitchMode		();
+	void			PerformSwitchGL	();
+	void			OnAnimationEnd	(u8 state);
+	virtual bool	GetBriefInfo			(II_BriefInfo& info);
+
+	virtual bool	IsNecessaryItem	    (const shared_str& item_sect);
+	virtual float Weight() const;
+
+	//виртуальные функции для проигрывания анимации HUD
+	virtual void	PlayAnimModeSwitch();
+	virtual shared_str SetCurrentReloadAnimation();
+	virtual shared_str SetCurrentStateAnimation(const shared_str& first_name);
+	virtual shared_str SetCurrentShootAnimation();
+	
+	virtual CWeaponMagazinedWGrenade* cast_weapon_magazined_w_grenade() { return this; }
+	virtual CRocketLauncher* cast_rocket_launcher() override { return this; }
+
+	virtual bool	IsGrenadeMode() const { return m_bGrenadeMode; }
+private:
+	virtual	void	net_Spawn_install_upgrades	( Upgrades_type saved_upgrades );
+	virtual bool	install_upgrade_impl		( const char* section, bool test );
+	virtual	bool	install_upgrade_ammo_class	( const char* section, bool test );
+	
+			int		GetAmmoCount2				( u8 ammo2_type ) const;
+
+protected:
+	virtual void ForceUpdateHUD() override;
+
+public:
+	//дополнительные параметры патронов 
+	//для подствольника
+	xr_vector<shared_str>	m_ammoTypes2 = {};
+
+	int						iMagazineSize2 = 0;
+	xr_vector<CCartridge>	m_magazine2 = {};
+
+	bool					m_bGrenadeMode = false;
+
+	CCartridge				m_DefaultCartridge2;
+
+	virtual u8				GetTargetAmmoType(bool for_grenade_mode = false) const override;
+	virtual u8				GetAmmoType(bool for_grenade_mode = false) const override;
+	virtual const xr_vector<shared_str>& getAmmoTypes(bool for_grenade_mode = false) const override;
+	virtual int	GetCurrentElapsed(bool for_grenade_mode = false) const override;
+
+	virtual void UpdateGrenadeVisibility(bool visibility);
+
+	//название косточки для гранаты подствольника в HUD
+	shared_str grenade_bone_name;
+};

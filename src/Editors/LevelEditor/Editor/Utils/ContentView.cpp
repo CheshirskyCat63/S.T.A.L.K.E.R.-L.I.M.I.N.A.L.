@@ -1,0 +1,2511 @@
+#include "stdafx.h"
+#include "ContentView.h"
+
+#include "../../Nodes/UIDialogsView.h"
+#include "../../../../utils/xrDXT/xrDXT.h"
+
+#include "Viewports/ViewportMesh.h"
+#include "Viewports/ViewportParticle.h"
+#include "IconsFontAwesome6.h"
+#include "../../UI/UITextureViewer.h"
+
+CContentView* GContentView = nullptr;
+
+CContentView::CContentView(xr_string NewWindowName)
+	: WatcherPtr(nullptr), WindowName(NewWindowName)
+{
+	string_path Dir = {};
+	FS.update_path(Dir, "$fs_root$", "");
+
+	RootDir = xr_path(Dir).xstring();
+	CurrentDir = RootDir;
+	CopiedObjects.clear();
+	ExtDesc.clear();
+	IsCutting = false;
+
+	FS.update_path(Dir, "$logs$", "");
+	LogsDir = Dir;
+
+	DirCollection.reserve(255);
+}
+
+void CContentView::CollectAllFolder()
+{
+	DirCollection.clear();
+
+	FS_FileSet Files;
+
+	DirCollection.push_back("rawdata");
+	FS.file_list(Files, "$server_data_root$", FS_ListFolders);
+	for (const auto& File : Files)
+	{
+		xr_string Out = File.name;
+		if (Out.ends_with('\\'))
+		{
+			Out.pop_back();
+		}
+		DirCollection.emplace_back("rawdata\\" + Out);
+	}
+	Files.clear();
+
+	DirCollection.push_back("import");
+	FS.file_list(Files, "$import$", FS_ListFolders);
+	for (const auto& File : Files)
+	{
+		xr_string Out = File.name;
+		if (Out.ends_with('\\'))
+		{
+			Out.pop_back();
+		}
+		DirCollection.emplace_back("import\\" + Out);
+	}
+	Files.clear();
+
+	DirCollection.push_back("gamedata");
+	FS.file_list(Files, "$game_data$", FS_ListFolders);
+	for (const auto& File : Files)
+	{
+		xr_string Out = File.name;
+		if (Out.ends_with('\\'))
+		{
+			Out.pop_back();
+		}
+		DirCollection.emplace_back("gamedata\\" + Out);
+	}
+	Files.clear();
+
+	DirCollection.push_back("spawn elements");
+	const xr_map<xr_string, CContentView::FileOptData>& TempPath = ScanConfigs("");
+	for (const auto& [DirName, DirInfo] : TempPath)
+	{
+		if (!DirInfo.IsDir)
+		{
+			continue;
+		}
+
+		xr_string Out = DirName;
+		if (Out.ends_with('\\'))
+		{
+			Out.pop_back();
+		}
+
+		DirCollection.emplace_back("spawn elements\\" + Out);
+	}
+
+	for (auto& FullPath : DirCollection)
+	{
+		auto* Current = &Root;
+		size_t Start = 0;
+		while (Start < FullPath.size())
+		{
+			size_t Pos = FullPath.find_first_of("/\\", Start);
+			xr_string Part = (Pos == xr_string::npos) ? FullPath.substr(Start) : FullPath.substr(Start, Pos - Start);
+			Start = (Pos == xr_string::npos) ? FullPath.size() : Pos + 1;
+
+			auto It = std::find_if(Current->Children.begin(), Current->Children.end(), [&](FolderNode& N) { return N.Name == Part; });
+
+			if (It == Current->Children.end())
+			{
+				Current->Children.push_back({ Part, FullPath });
+				It = Current->Children.end() - 1;
+			}
+
+			Current = &(*It);
+		}
+	}
+}
+
+void CContentView::DrawFolderNode(FolderNode& Node)
+{
+	ImGuiTreeNodeFlags Flags = ImGuiTreeNodeFlags_SpanFullWidth | ImGuiTreeNodeFlags_DrawLinesToNodes;
+	Flags |= Node.Children.empty() ? ImGuiTreeNodeFlags_Leaf : ImGuiTreeNodeFlags_OpenOnArrow;
+	// xroo: icon is a crutch. Should be maked separate with its own color.
+	xr_string FolderName = xr_string(ICON_FA_FOLDER) + " " + Node.Name;
+
+	bool Open = XRay::ImGui::TreeNodeEx(FolderName.c_str(), Flags);
+
+	if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+	{
+		CurrentDir = Node.FullPath;
+		ClearFileList();
+
+		IsSpawnElement = Node.FullPath.StartWith("spawn elements");
+		if (IsSpawnElement)
+		{
+			xr_string OutPath;
+			if (Node.FullPath.length() > 15)
+			{
+				OutPath = Node.FullPath.substr(15);
+			}
+
+			VirtualPath.clear();
+			RescanISEDirectory(OutPath);
+		}
+	}
+
+	if (Open)
+	{
+		for (auto& Child : Node.Children)
+		{
+			DrawFolderNode(Child);
+		}
+		ImGui::TreePop();
+	}
+}
+
+void CContentView::DrawFolderTree()
+{
+	static bool SortAscending = true;
+
+	const	float	WindowPadding	= XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::WindowPadding);
+	const	float	RowHeight		= XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::TableRowHeight);
+	const	float	RowPadding		= XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::TableTextPaddingY);
+
+	if (XRay::ImGui::BeginDarkChild("##FolderTreePanel", ImVec2(ImGui::GetContentRegionMax().x - 1.f, 0), true))
+	{
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.f);
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { ImGui::GetStyle().FramePadding.y , RowPadding });
+		ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, { 0.f, 0.5f });
+		if (ImGui::Button("Name", { -0.01, 0 }))
+		{
+			SortAscending = !SortAscending;
+		}
+
+		// xroo: I will move this marker on the button to ModernUI_widgets when I understand how it will be reused.
+		ImGui::SetWindowFontScale(0.75f);
+		XRay::ImGui::SameLine(0.f, -RowHeight/2);
+		ImGui::Text(SortAscending ? ICON_FA_SORT_DOWN : ICON_FA_SORT_UP);
+		ImGui::SetWindowFontScale(1.0f);
+
+		ImGui::PopStyleVar(3);
+
+		std::function<void(FolderNode&)> SortTree = [&](FolderNode& Node)
+		{
+			if (SortAscending)
+			{
+				std::sort(Node.Children.begin(), Node.Children.end(), [](auto& a, auto& b) { return a.Name < b.Name; });
+			}
+			else
+			{
+				std::sort(Node.Children.begin(), Node.Children.end(), [](auto& a, auto& b) { return a.Name > b.Name; });
+			}
+
+			for (auto& Child : Node.Children)
+			{
+				SortTree(Child);
+			}
+		};
+		SortTree(Root);
+
+        // xroo: Need a variable for indent spacing from themes.
+		ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, 18.0f);
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, XRay::ImGui::GetEditorColor(XRay::ImGui::EEditorColors::TableTint).Value);
+		if (ImGui::BeginChild("##ContentBrowserTreeView", { 0.f, 0.f }))
+		{
+			for (auto& Child : Root.Children)
+			{
+				DrawFolderNode(Child);
+			}
+		}
+		ImGui::EndChild();
+		ImGui::PopStyleColor();
+		ImGui::PopStyleVar();
+	}
+	XRay::ImGui::EndDarkChild();
+}
+
+void CContentView::DrawLayout()
+{
+	const size_t IterCount = (ImGui::GetWindowSize().x / (BtnSize.x + 15)) - 1;
+	size_t HorBtnIter = 0;
+	xr_string NextDir = CurrentDir;
+
+	if (ImGui::IsWindowHovered(ImGuiHoveredFlags_None) && ImGui::IsMouseReleased(1) && !ImGui::IsAnyItemHovered())
+	{
+		if (!xr_path(CurrentDir).has_root_path() && !IsSpawnElement)
+			ImGui::OpenPopup("##contentbrowsercontext");
+		SelectedObjects.clear();
+	}
+	else if (!RenameObject.Focus && ImGui::IsMouseClicked(0))
+	{
+		RenameObject.Active = false;
+	}
+	else if (ImGui::IsWindowHovered(ImGuiHoveredFlags_None) && ImGui::IsMouseReleased(0) && !ImGui::IsAnyItemHovered())
+	{
+		SelectedObjects.clear();
+	}
+
+	DrawFormContext();
+
+	if ((!RootDir.Contains(CurrentDir) && !IsSpawnElement) || IsFindResult)
+	{
+		DrawOtherDir(HorBtnIter, IterCount, NextDir);
+	}
+	else if (IsParticles)
+	{
+		DrawParticlesDir(HorBtnIter, IterCount);
+	}
+	else if (IsSpawnElement)
+	{
+		DrawISEDir(HorBtnIter, IterCount);
+	}
+	else
+	{
+		DrawRootDir(HorBtnIter, IterCount, NextDir);
+	}
+
+	ImGui::Dummy({ 0,0 });
+
+	CurrentDir = NextDir;
+	xr_strlwr(CurrentDir);
+}
+
+void CContentView::Draw()
+{
+	if (IsWndDestroyed)
+		return;
+
+	const	float	RowHeight		= XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::TableRowHeight);
+	const	float	ToolbarPadding	= XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::ToolbarPadding);
+	ImGuiStyle& style = ImGui::GetStyle();
+	float OldChildRound = style.ChildRounding;
+
+	style.ChildRounding = 0.f;
+
+	if (DirCollection.empty() || NeedRescan)
+	{
+		CollectAllFolder();
+	}
+
+	UpdateSoundPreview();
+
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(250, 100));
+	if (ImGui::Begin(WindowName.c_str()))
+	{
+		if ((NeedRescan || Files.empty()) && !IsFindResult && !IsSpawnElement && !IsParticles)
+		{
+			RescanDirectory();
+			NeedRescan = false;
+		}
+
+		ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(0, 0));
+		if (ImGui::BeginTable("##ContentBrowserTable", 2, ImGuiTableFlags_Resizable, { -0.001f, -1 }))
+		{
+			ImGui::TableSetupColumn("##ContentBrowserLeftSide", ImGuiTableColumnFlags_WidthFixed, 200.f);
+			ImGui::TableSetupColumn("##ContentBrowserRightSide", ImGuiTableColumnFlags_WidthStretch);
+
+			ImGui::TableNextRow();
+
+			ImGui::TableSetColumnIndex(0);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2.f, 2.f));
+			if (ImGui::BeginChild("##ContentBrowserFileTree", ImVec2(-0.01f, -0.01f), ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AutoResizeY))
+			{
+				DrawFolderTree();
+			}
+			ImGui::EndChild();
+			ImGui::PopStyleVar();
+
+			ImGui::TableSetColumnIndex(1);
+
+			ImVec2 availRegion = ImGui::GetContentRegionAvail();
+			if (availRegion.x > 15)
+			{
+				ImGui::PushStyleColor(ImGuiCol_ChildBg, XRay::ImGui::GetEditorColor(XRay::ImGui::EEditorColors::PanelBorderTint).Value);
+				ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { ToolbarPadding, ToolbarPadding });
+				if (ImGui::BeginChild("##ContentBrowserSearch", ImVec2(ImGui::GetContentRegionAvail().x, 0), ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeY))
+				{
+					DrawHeader();
+				}
+				ImGui::EndChild();
+				ImGui::PopStyleVar();
+				ImGui::PopStyleColor();
+			}
+			availRegion = ImGui::GetContentRegionAvail();
+			if (availRegion.x > 15)
+			{
+				ImGui::PushStyleColor(ImGuiCol_ChildBg, XRay::ImGui::GetEditorColor(XRay::ImGui::EEditorColors::PanelTint).Value);
+				if (ImGui::BeginChild("##contentbrowserscroll"))
+				{
+					DrawLayout();
+				}
+
+				if (CurrentItemHint.Active)
+				{
+					ImGui::SetCursorPos(CurrentItemHint.Pos);
+					ImGui::Button(CurrentItemHint.Name.c_str());
+					CurrentItemHint.Active = false;
+				}
+
+				ImGui::EndChild();
+				ImGui::PopStyleColor();
+			}
+
+			const ImGuiPayload* payload = ImGui::GetDragDropPayload();
+
+			if (payload && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+			{
+				ImDrawList* draw_list = ImGui::GetWindowDrawList();
+				ImVec2 p_min = ImGui::GetItemRectMin();
+				ImVec2 p_max = ImGui::GetItemRectMax();
+				draw_list->AddRectFilled(p_min, p_max, IM_COL32(50, 50, 70, 100));
+				draw_list->AddRect(p_min, p_max, IM_COL32(100, 180, 255, 255));
+			}
+			ImGui::EndTable();
+		}
+		ImGui::PopStyleVar();
+	}
+	ImGui::PopStyleVar(2);
+
+	ImGui::End();
+
+	style.ChildRounding = OldChildRound;
+	ThmPropWnd.Draw();
+}
+
+void CContentView::DrawHeader()
+{
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+
+	const	float	BtnHeight	= GUIManager->ScaleByDpi((ViewMode == EViewMode::Tile) ? 64.f : 32.f);
+					BtnSize		= ImVec2(BtnHeight, BtnHeight);
+			ImGuiStyle& style	= ImGui::GetStyle();
+	const	float	FindStartPosX = ImGui::GetWindowSize().x;
+	const	float	Height		= style.FontSizeBase + style.FramePadding.y * 2;
+	const	float	WindowPadding = XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::WindowPadding);
+	const	float	ToolbarPadding = XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::ToolbarPadding);
+	const	float	TableBorder = XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::TableBorder);
+	const	float	Rounding	= XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::ButtonRadius);
+	const	float	IconHeight	= XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::IconSize) * 0.7;
+
+			ImColor NavColor	= XRay::ImGui::GetEditorColor(XRay::ImGui::EEditorColors::TableTint);
+			ImColor NavHover	= XRay::ImGui::GetEditorColor(XRay::ImGui::EEditorColors::TableHover);
+			ImColor NavActive	= XRay::ImGui::GetEditorColor(XRay::ImGui::EEditorColors::TableActive);
+	const	float	FindSizeX	= FindStartPosX / 3.5f;
+
+	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, Rounding);
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, NavColor.Value);
+
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
+	ImGui::PushStyleColor(ImGuiCol_Button, NavColor.Value);
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, NavHover.Value);
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive, NavActive.Value);
+
+	if (ImGui::BeginChild("##BreadCrumbsBar", { -FindSizeX, 0 }, ImGuiChildFlags_AutoResizeY))
+	{
+		if (ImGui::Button("root"))
+		{
+			CurrentDir = RootDir;
+			IsSpawnElement = false;
+			IsParticles = false;
+			IsFindResult = false;
+			std::memset(FindStr, 0, sizeof(FindStr));
+			VirtualPath.clear();
+		}
+
+		ImGui::SameLine();
+		ImGui::TextUnformatted(">");
+
+		auto DrawByPathLambda = [&](const xr_string& ViewDir)
+		{
+			auto Pathes = ViewDir.Split('\\');
+
+			u16 Iter = 0;
+			for (const xr_string& Path : Pathes)
+			{
+				ImGui::SameLine(0, 0);
+
+				xr_string ButtonPathName = Path + "##" + xr_string::ToString(Iter);
+
+				if (ImGui::Button(Platform::ANSI_TO_UTF8(ButtonPathName).c_str()))
+				{
+					xr_string NewPath;
+					for (const xr_string& LocPath : Pathes)
+					{
+						NewPath += LocPath;
+						if (LocPath == Path)
+							break;
+						NewPath += "\\";
+					}
+
+					if (IsSpawnElement)
+					{
+						VirtualPath = NewPath;
+						RescanISEDirectory(VirtualPath);
+					}
+					else if (IsParticles)
+					{
+						VirtualPath = NewPath;
+						RescanParticlesDirectory(VirtualPath);
+					}
+					else
+					{
+						CurrentDir = NewPath;
+						RescanDirectory();
+					}
+				}
+
+				if (&Path != &Pathes.back())
+				{
+					ImGui::SameLine(0, 0);
+					ImGui::TextUnformatted(">");
+				}
+
+				Iter++;
+			}
+		};
+		if (IsSpawnElement || IsParticles)
+		{
+			ImGui::SameLine();
+			shared_str DirPartialName = IsSpawnElement ? "spawn element" : "particles";
+
+			if (ImGui::Button(*DirPartialName))
+			{
+				VirtualPath.clear();
+
+				if (IsSpawnElement)
+				{
+					RescanISEDirectory(VirtualPath);
+				}
+				else
+				{
+					RescanParticlesDirectory(VirtualPath);
+				}
+			}
+			ImGui::SameLine();
+			ImGui::TextUnformatted("/");
+
+			if (!VirtualPath.empty())
+			{
+				DrawByPathLambda(VirtualPath);
+			}
+		}
+		else if (CurrentDir != RootDir)
+		{
+			DrawByPathLambda(CurrentDir);
+		}
+		ImGui::EndChild();
+	}
+
+	ImGui::SameLine(0, ToolbarPadding);
+
+	ImGui::PopStyleColor(3); // Button, ButtonHovered, ButtonActive
+	ImGui::PopStyleVar(); // FrameBorderSize
+
+	if (ImGui::BeginChild("##SearchBar", { FindSizeX - ToolbarPadding, 0 }, ImGuiChildFlags_AutoResizeY))
+	{
+		ImVec2 IconSize = { IconHeight, IconHeight };
+		ImGui::SetNextItemWidth(FindSizeX - ToolbarPadding - Height - ToolbarPadding - IconSize.x);
+		ImGui::SetNextItemAllowOverlap();
+		if (ImGui::InputTextWithHint("##Search", "Search", FindStr, sizeof(FindStr)))
+		{
+			FindFile();
+		}
+
+		//Varian 2
+		if (GUIManager->SearchIcon)
+		{
+			XRay::ImGui::SameLine(0, 0);
+			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (Height - IconSize.y) / 2.f);
+
+			ImGui::Image(GUIManager->SearchIcon, IconSize);
+		}
+
+		XRay::ImGui::SameLine(0, ToolbarPadding + TableBorder);
+
+		if (ImGui::BeginPopupContextItem("MenuCBPpp"))
+		{
+			if (ImGui::Checkbox("Show THM", &IsThmMode) && !IsSpawnElement)
+			{
+				RescanDirectory();
+			}
+			if (ImGui::Checkbox("Show Temp Files", &IsTempMode) && !IsSpawnElement)
+			{
+				RescanDirectory();
+			}
+			ImGui::Separator();
+
+			if (ImGui::BeginMenu("View mode"))
+			{
+				if (ImGui::MenuItem("Tile"))
+				{
+					ViewMode = EViewMode::Tile;
+				}
+				if (ImGui::MenuItem("List"))
+				{
+					ViewMode = EViewMode::List;
+				}
+
+				ImGui::EndMenu();
+			}
+
+			ImGui::EndPopup();
+		}
+	/*
+	Exception thrown: read access violation.
+this->MenuIcon.p_ was nullptr.
+	*/
+
+	//if (MenuIcon && ImGui::ImageButton("##MenuCB", MenuIcon->get_SRView()->GetRawSRV(), { 15, 15 }))
+		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + TableBorder);
+		if (MenuIcon && XRay::ImGui::Button(ICON_FA_BARS"##IMenuCB", { Height - TableBorder * 2.f, Height - TableBorder * 2.f }))
+		{
+			ImGui::OpenPopup("MenuCBPpp");
+		}
+		ImGui::EndChild();
+	}
+	ImGui::PopStyleColor(); // ChildBg
+	ImGui::PopStyleVar(); // ChildRounding
+	ImGui::PopStyleVar(); // ItemSpacing
+}
+
+void CContentView::FindFile()
+{
+	xr_string ParseStr = IsUTF8(FindStr) ? Platform::UTF8_to_CP1251(FindStr) : FindStr;
+	size_t Len = ParseStr.length();
+	if (Len > 2)
+	{
+		IsFindResult = true;
+		if (CurrentDir == RootDir && !IsSpawnElement)
+		{
+			IsDelWatcher = true;
+			xr_delete(WatcherPtr);
+
+			ClearFileList();
+			for (const auto& file : xr_dir_recursive_iter { CurrentDir.data() })
+			{
+				if (file.is_directory())
+					continue;
+
+				const xr_string& FName = file.path().filename().string().data();
+				if (FName.Contains(ParseStr) && CheckFile(FName))
+				{
+					Files.push_back({ file, false });
+				}
+			}
+
+			auto TempPath = ScanConfigs("");
+			ScanConfigsRecursive(TempPath, ParseStr);
+		}
+		else if (IsSpawnElement)
+		{
+			ClearFileList();
+
+			auto TempPath = ScanConfigs("");
+			ScanConfigsRecursive(TempPath, ParseStr);
+		}
+		else
+		{
+			IsDelWatcher = true;
+			xr_delete(WatcherPtr);
+
+			ClearFileList();
+			for (const xr_dir_entry& file : xr_dir_recursive_iter { CurrentDir.data() })
+			{
+				if (file.is_directory())
+					continue;
+
+				const xr_string& FName = xr_path(file.path()).xfilename();
+				if (FName.Contains(ParseStr) && CheckFile(FName))
+				{
+					Files.push_back({ file, false });
+				}
+			}
+		}
+	}
+	else if (Len == 0)
+	{
+		IsFindResult = false;
+
+		if (IsSpawnElement)
+		{
+			RescanISEDirectory(VirtualPath);
+		}
+		else
+		{
+			RescanDirectory();
+		}
+	}
+}
+
+void CContentView::ScanConfigsRecursive(xr_map<xr_string, CContentView::FileOptData>& TempPath, const xr_string& ParseStr)
+{
+	for (auto& [Name, DirOpt] : TempPath)
+	{
+		if (DirOpt.IsDir)
+		{
+			auto RecFiles = ScanConfigs(Name);
+			ScanConfigsRecursive(RecFiles, ParseStr);
+		}
+
+		if (Name.Contains(ParseStr) && !DirOpt.IsDir)
+		{
+			Files.push_back(DirOpt);
+		}
+	}
+}
+
+void CContentView::DrawISEDir(size_t& HorBtnIter, const size_t IterCount)
+{
+	if (DrawItem({ "..", true }, HorBtnIter, IterCount))
+	{
+		if (VirtualPath.empty())
+		{
+			IsSpawnElement = false;
+			VirtualPath = "";
+			ClearFileList();
+		}
+		else
+		{
+			xr_string Validate = VirtualPath;
+			if (Validate.ends_with('\\'))
+			{
+				Validate = Validate.erase(Validate.length() - 1);
+			}
+			xr_path ISEFS = Validate;
+
+			if (ISEFS.has_parent_path())
+			{
+				RescanISEDirectory(ISEFS.parent_path().string().data());
+				VirtualPath = ISEFS.parent_path().string().data();
+			}
+			else
+			{
+				VirtualPath = "";
+				RescanISEDirectory("");
+			}
+		}
+	}
+
+	for (const FileOptData& Data : Files)
+	{
+		if (DrawItem(Data, HorBtnIter, IterCount))
+		{
+			if (Data.IsDir)
+			{
+				const xr_string& CopyFileName = Data.File.xstring();
+				RescanISEDirectory(CopyFileName);
+			}
+
+			break;
+		}
+	}
+}
+
+void CContentView::DrawParticlesDir(size_t& HorBtnIter, const size_t IterCount)
+{
+	// Draw ".." button to go up one level
+	if (DrawItem({ "..", true }, HorBtnIter, IterCount))
+	{
+		xr_path TryVirtualPath = VirtualPath;
+		if (VirtualPath.empty())
+		{
+			IsParticles = false;
+		}
+		else if (TryVirtualPath.has_parent_path())
+		{
+			VirtualPath = TryVirtualPath.parent_path().string().c_str();
+		}
+		else
+		{
+			VirtualPath = "";
+		}
+
+		ClearFileList();
+
+		if (IsParticles)
+		{
+			RescanParticlesDirectory(VirtualPath);
+		}
+	}
+
+	// Draw particle items
+	for (const FileOptData& Data : Files)
+	{
+		if (DrawItem(Data, HorBtnIter, IterCount))
+		{
+			// Handle particle item double-click
+			if (!Data.IsDir) // Particles are files, not directories
+			{
+				// You might want to implement particle editing functionality here
+				// For example:
+				// ExecCommand(COMMAND_EDIT_PARTICLE, Data.File.xstring());
+			}
+			else
+			{
+				VirtualPath = Data.File;
+				RescanParticlesDirectory(Data.File);
+			}
+		}
+	}
+}
+
+void CContentView::DrawRootDir(size_t& HorBtnIter, const size_t& IterCount, xr_string& NextDir)
+{
+	string_path FSEntry = {};
+	auto PathClickLambda = [&FSEntry, &HorBtnIter, &IterCount, &NextDir, this]()
+	{
+		xr_string Validate = FSEntry;
+		if (Validate.ends_with('\\'))
+		{
+			Validate = Validate.erase(Validate.length() - 1);
+		}
+
+		ImGui::BeginDisabled(!FS.TryLoad(FSEntry));
+
+		if (DrawItem({ Validate.c_str(), true }, HorBtnIter, IterCount))
+		{
+			NextDir = FSEntry;
+			if (NextDir.ends_with('\\'))
+			{
+				NextDir = NextDir.erase(NextDir.length() - 1);
+			}
+			ClearFileList();
+		}
+
+		ImGui::EndDisabled();
+	};
+
+	IsSpawnElement = false;
+
+	FS.update_path(FSEntry, "$server_data_root$", "");
+	PathClickLambda();
+
+	FS.update_path(FSEntry, "$import$", "");
+	PathClickLambda();
+
+	FS.update_path(FSEntry, "$game_data$", "");
+	PathClickLambda();
+
+	if (DrawItem({ "particles", true }, HorBtnIter, IterCount))
+	{
+		RescanParticlesDirectory("");
+	}
+
+	if (DrawItem({ "spawn elements", true }, HorBtnIter, IterCount))
+	{
+		RescanISEDirectory("");
+	}
+}
+
+void CContentView::RescanISEDirectory(const xr_string& StartPath)
+{
+	ClearFileList();
+
+	if (!StartPath.empty() && StartPath != VirtualPath)
+	{
+		if (!VirtualPath.empty() && !VirtualPath.ends_with('\\'))
+			VirtualPath += "\\";
+
+		VirtualPath += StartPath + '\\';
+	}
+
+	auto TempPath = ScanConfigs(StartPath);
+
+	for (auto& [Name, DirOpt] : TempPath)
+	{
+		if (DirOpt.IsDir)
+		{
+			Files.push_back(DirOpt);
+		}
+	}
+
+	for (auto& [Name, DirOpt] : TempPath)
+	{
+		if (!DirOpt.IsDir)
+		{
+			Files.push_back(DirOpt);
+		}
+	}
+
+	if (VirtualPath.empty())
+	{
+		Files.push_back({ xr_string(xr_string(ENVMOD_CHOOSE_NAME) + ".ise") , false, ENVMOD_CHOOSE_NAME });
+		Files.push_back({ xr_string(xr_string(RPOINT_CHOOSE_NAME) + ".ise") , false, RPOINT_CHOOSE_NAME });
+	}
+
+	IsSpawnElement = true;
+}
+
+void CContentView::RescanParticlesDirectory(const xr_string& path)
+{
+	ClearFileList();
+
+	xr_vector<xr_string> Directories;
+
+	auto ApplyParticleLambda = [&](const char* Name, const char* ext, void* Ptr)
+	{
+		xr_path PEPath = Name;
+		if (PEPath.has_parent_path() && !path.empty())
+		{
+			xr_string ParentPath = PEPath.parent_path().string().c_str();
+			if (ParentPath == path)
+			{
+				FileOptData FileInfo;
+				FileInfo.File = Name;
+				FileInfo.File.replace_extension(ext);
+
+				Files.push_back(FileInfo);
+				ParticlesCache[xr_string(Name) + "." + ext] = Ptr;
+			}
+			else if (!path.empty() && ParentPath.contains(path))
+			{
+				auto Iter = std::find(Directories.begin(), Directories.end(), ParentPath);
+				if (Iter == Directories.end())
+				{
+					FileOptData FileInfo;
+					FileInfo.File = ParentPath;
+					FileInfo.IsDir = true;
+					Directories.push_back(ParentPath);
+
+					Files.push_back(FileInfo);
+				}
+			}
+		}
+		else if (path.empty() && !PEPath.has_parent_path())
+		{
+			FileOptData FileInfo;
+			FileInfo.File = Name;
+			Files.push_back(FileInfo);
+			ParticlesCache[xr_string(Name) + "." + ext] = Ptr;
+		}
+		else if (path.empty() && PEPath.has_parent_path())
+		{
+			xr_path TestDir = PEPath.parent_path();
+			while (TestDir.has_parent_path())
+			{
+				TestDir = TestDir.parent_path();
+			}
+
+			auto Iter = std::find(Directories.begin(), Directories.end(), TestDir.xfilename());
+			if (Iter == Directories.end())
+			{
+				FileOptData FileInfo;
+				FileInfo.File = TestDir;
+				FileInfo.IsDir = true;
+				Directories.push_back(TestDir.xfilename());
+
+				Files.push_back(FileInfo);
+			}
+		}
+	};
+
+	PS::PEDIt Pe = RImplementation.PSLibrary.FirstPED();
+	PS::PEDIt Ee = RImplementation.PSLibrary.LastPED();
+	for (; Pe != Ee; Pe++)
+	{
+		ApplyParticleLambda(*(*Pe)->m_Name, "pe", (*Pe));
+	}
+
+	PS::PGDIt Pg = RImplementation.PSLibrary.FirstPGD();
+	PS::PGDIt Eg = RImplementation.PSLibrary.LastPGD();
+	for (; Pg != Eg; Pg++)
+	{
+		ApplyParticleLambda(*(*Pg)->m_Name, "pg", (*Pg));
+	}
+
+	IsParticles = true;
+}
+
+void CContentView::DrawOtherDir(size_t& HorBtnIter, const size_t IterCount, xr_string& NextDir)
+{
+	xr_path FilePath = CurrentDir;
+	if (!IsFindResult && DrawItem({ "..", true }, HorBtnIter, IterCount))
+	{
+		NextDir = FilePath.parent_path().string().data();
+		if (FilePath.parent_path().is_absolute() && !NextDir.Contains(RootDir) || NextDir.empty())
+		{
+			NextDir = RootDir;
+		}
+		ClearFileList();
+	}
+
+	for (FileOptData FilePath : Files)
+	{
+		if (FilePath.IsDir)
+		{
+			if (DrawItem(FilePath, HorBtnIter, IterCount))
+			{
+				NextDir = FilePath.File.xstring();
+				if (NextDir.ends_with('\\'))
+				{
+					//NextDir = NextDir.erase(NextDir.length() - 1);
+					NextDir.pop_back();
+				}
+				ClearFileList();
+				break;
+			}
+		}
+		else
+		{
+			if (DrawItem(FilePath, HorBtnIter, IterCount))
+			{
+				if (FilePath.File.extension() == ".xml")
+				{
+					xr_string FileName = FilePath.File.xfilename();
+					FileName = FileName.substr(0, FileName.size() - 4);
+
+					auto Iter = std::find(GameDialogs.begin(), GameDialogs.end(), FileName);
+					if (Iter != GameDialogs.end())
+					{
+						DialogEditor::OpenFile(FilePath.File.xfilename());
+					}
+				}
+				if (FilePath.File.extension() == ".thm")
+				{
+					ThmPropWnd.Load(FilePath.File);
+					ThmPropWnd.Show();
+				}
+				else if (FilePath.File.extension() == ".tga")
+				{
+					string_path fn = {};
+					FS.update_path(fn, _textures_, "");
+					xr_string OldPath = FilePath.File;
+
+					auto CharIndex = OldPath.find(fn);
+					if (CharIndex != xr_string::npos)
+					{
+						xr_string NewPath = OldPath.substr(OldPath.find(fn) + xr_strlen(fn));
+						NewPath = NewPath.substr(0, NewPath.find_last_of("."));
+						ExecCommand(COMMAND_IMAGE_EDITOR_SELECT, NewPath, false);
+					}
+					else
+					{
+						FS.update_path(fn, _import_, "");
+						CharIndex = OldPath.find(fn);
+
+						if (CharIndex != xr_string::npos)
+						{
+							xr_string NewPath = OldPath.substr(OldPath.find(fn) + xr_strlen(fn));
+							ExecCommand(COMMAND_IMAGE_EDITOR_SELECT, NewPath, true);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+void CContentView::ClearFileList()
+{
+	Files.clear();
+}
+
+void CContentView::RescanDirectory()
+{
+	IsDelWatcher = true;
+	xr_delete(WatcherPtr);
+
+	ClearFileList();
+
+	if (!std::filesystem::exists(CurrentDir.c_str()))
+	{
+		CurrentDir = RootDir;
+	}
+
+	for (const auto& file : xr_dir_iter{ CurrentDir.data() })
+	{
+		if (std::filesystem::is_directory(file))
+		{
+			Files.push_back({ file, true });
+		}
+	}
+	for (const xr_dir_entry& file : xr_dir_iter { CurrentDir.data() })
+	{
+		if (!file.is_directory() && CheckFile(file))
+		{
+			Files.push_back({ file, false });
+
+			if (CSoundPreviewCache::IsPreviewable(file))
+			{
+				SoundPreviews.Refresh(file);
+			}
+		}
+	}
+
+	WatcherPtr = new filewatch::FileWatch<std::string>
+	(
+		CurrentDir.data(),
+		[this](const std::string&, const filewatch::Event)
+		{
+			NeedRescan = true;
+		}
+	);
+}
+
+void CContentView::Destroy()
+{
+	StopSoundPreview();
+	SoundPreviews.Clear();
+
+	MenuIcon.destroy();
+	Icons.clear();
+
+	IsWndDestroyed = true;
+}
+
+void CContentView::ResetBegin() {
+}
+
+void CContentView::ResetEnd() {
+}
+
+void CContentView::LoadCustomIcons()
+{
+	if (EPrefs->custom_icons.size() == 0)
+		return;
+
+	for (auto el : EPrefs->custom_icons)
+	{
+		if (Icons.contains(el.second.c_str()))
+		{
+			Icons[el.first.c_str()] = Icons[el.second.c_str()];
+			Icons[el.first.c_str()].UseButtonColor = true;
+		}
+		else
+		{
+			string_path Path = {};
+			sprintf(Path, "%s%s", "ed\\content_browser\\", el.second.c_str());
+			Icons[el.first.c_str()] = { DEV->_CreateTexture(Path),	true };
+		}
+
+	}
+	
+}
+
+void CContentView::RemoveCustomIcon(const xr_string& icon)
+{
+	if (Icons.contains(icon))
+		Icons.erase(icon);
+}
+
+void CContentView::Init()
+{
+	Icons["Folder"] = {DEV->_CreateTexture("ed\\content_browser\\folder"),	true};
+	Icons[".."]		= {DEV->_CreateTexture("ed\\content_browser\\folder"),	true};
+	Icons["thm"]	= {DEV->_CreateTexture("ed\\content_browser\\thm"),		true};
+	Icons["logs"]	= {DEV->_CreateTexture("ed\\content_browser\\log"),		true};
+	Icons["ogg"]	= {DEV->_CreateTexture("ed\\content_browser\\ogg"),		true};
+	Icons["level"]	= {DEV->_CreateTexture("ed\\content_browser\\level"),	true};
+	Icons["wav"]	= {DEV->_CreateTexture("ed\\content_browser\\wav"),		true};
+	Icons["object"] = {DEV->_CreateTexture("ed\\content_browser\\object"),	true};
+	Icons["image"]	= {DEV->_CreateTexture("ed\\content_browser\\image"),	true};
+	Icons["seq"]	= {DEV->_CreateTexture("ed\\content_browser\\seq"),		true};
+	Icons["tga"]	= {DEV->_CreateTexture("ed\\content_browser\\tga"),		true};
+	Icons["file"]	= {DEV->_CreateTexture("ed\\content_browser\\file"),		true};
+	Icons["exe"]	= {DEV->_CreateTexture("ed\\content_browser\\exe"),		true};
+	Icons["cmd"]	= {DEV->_CreateTexture("ed\\content_browser\\cmd"),		true};
+	Icons["dll"]	= {DEV->_CreateTexture("ed\\content_browser\\dll"),		true};
+	Icons["backup"] = {DEV->_CreateTexture("ed\\content_browser\\backup"),	true};
+	Icons["env_mod"]= {DEV->_CreateTexture("ed\\content_browser\\env_mod"),	true};
+	Icons["dialogs"] = { DEV->_CreateTexture("ed\\content_browser\\dialogs"),true};
+	Icons["multi"]	= {DEV->_CreateTexture("ed\\content_browser\\multi"),	true};
+
+	MenuIcon = DEV->_CreateTexture("ed\\bar\\menu");
+
+	LoadCustomIcons();
+	LoadExtDest();
+
+	SoundPreviews.Initialize();
+
+	xr_string Files = pSettings->r_string("dialogs", "files");
+	Files.RemoveWhitespaces();
+	GameDialogs = Files.Split(',');
+}
+
+void CContentView::LoadExtDest()
+{
+	ExtDesc["_dir"] = "Directory";
+	ExtDesc[".dds"] = "Texture Asset";
+	ExtDesc[".tga"] = "Raw Texture Asset";
+	ExtDesc[".png"] = "Image";
+	ExtDesc[".object"] = "Object Asset";
+	ExtDesc[".group"] = "Group object Asset";
+	ExtDesc[".r16"] = "HeightMap Asset";
+	ExtDesc[".ogf"] = "Object";
+	ExtDesc[".wav"] = "Raw Sound";
+	ExtDesc[".ogg"] = "Sound Asset";
+	ExtDesc[".ise"] = "Spawn Component";
+	ExtDesc[".skl"] = "Raw Single Animation Asset";
+	ExtDesc[".skls"] = "Raw Animations Asset";
+	ExtDesc[".omf"] = "Animations Asset";
+	ExtDesc["_script_ltx"] = "Logic Preference";
+	ExtDesc[".ltx"] = "Config";
+	ExtDesc[".script"] = "Lua Script";
+	ExtDesc["dialogs"] = "Dialog Description";
+}
+
+bool CContentView::DrawItem(const FileOptData& FilePath, size_t& HorBtnIter, const size_t IterCount)
+{
+	bool IsClicked = false;
+
+	IsClicked = DrawItemN(FilePath, HorBtnIter, IterCount);
+
+	if (IsClicked)
+		SelectedObjects.clear();
+
+	return IsClicked;
+}
+
+void CContentView::AcceptDragDropAction(const CContentView::FileOptData& InitFileName)
+{
+	if ((InitFileName.File == ".." && CurrentDir.find_last_of("/\\") == xr_string::npos) || IsSpawnElement || !ImGui::BeginDragDropTarget())
+	{
+		return;
+	}
+
+	auto ImData = ImGui::AcceptDragDropPayload("TEST");
+
+	if (ImData == nullptr)
+		ImData = ImGui::AcceptDragDropPayload("FLDR");
+
+	if (ImData == nullptr)
+		ImData = ImGui::AcceptDragDropPayload("OTHR");
+
+	if (ImData != nullptr)
+	{
+		if (ImData != nullptr)
+			Data = *(DragDropData*)ImData->Data;
+
+		if (Data.FileName != InitFileName.File.xstring()) //На всякий случай
+		{
+			CutAction(/*Data.FileName*/);
+			PasteAction(InitFileName.File);
+		}
+	}
+
+	ImGui::EndDragDropTarget();
+}
+
+bool CContentView::BeginDragDropAction(xr_path& FilePath, xr_string& FileName, const CContentView::FileOptData& InitFileName, CContentView::IconData* IconPtr)
+{
+	/*
+		Разделение на 3 типа dnd:
+
+			TEST - ".object", ".group", ".ise"
+					Объекты, которые принимает вьюпорт
+
+			FLDR - Только папки.
+					Для работы только в Content View
+
+			OTHR - Все иные объекты.
+					В дальнейшем можно как-нибудь использовать.
+					Или просто удалить совместив с FLDR.
+	*/
+
+	bool WeCanDrag = false;
+
+	if (FilePath.has_extension()) //File DnD
+	{
+		xr_string Extension = FilePath.extension().string().c_str();
+		WeCanDrag = Extension == ".object" || Extension == ".group" || Extension == ".r16" || Extension == ".ise" || Extension == ".dti" || Extension == ".rai";
+		
+		bool IsGameLogicFile = false;
+		if (FilePath.xstring().Contains("scripts\\") && Extension == ".ltx")
+		{
+			WeCanDrag = true;
+			IsGameLogicFile = true;
+		}
+
+		if (!ImGui::BeginDragDropSource())
+		{
+			return false;
+		}
+
+		if (WeCanDrag)
+		{
+			if (IsSpawnElement || FilePath.xstring().ends_with(".ise"))
+			{
+				if (InitFileName.ISESect.size() > 0)
+				{
+					Data.FileName = InitFileName.ISESect.c_str();
+				}
+			}
+			else
+			{
+				Data.FileName = FilePath;
+			}
+
+			xr_string PayloadName = "TEST";
+			GUIManager->DnDType = EDragDropType::Viewport;
+
+			if (SelectedObjects.size() != 1)
+			{
+				PayloadName = "OTHR";
+				GUIManager->DnDType = EDragDropType::File;
+			}
+			else if (FilePath.xstring().ends_with(".dti"))
+			{
+				PayloadName += "#dti";
+				GUIManager->DnDType = EDragDropType::Details;
+			}
+			else if (FilePath.xstring().ends_with(".rai"))
+			{
+				PayloadName += "#rai";
+				GUIManager->DnDType = EDragDropType::RandomAppend;
+			}
+			else if (IsGameLogicFile)
+			{
+				PayloadName += "#cd";
+				GUIManager->DnDType = EDragDropType::Logic;
+			}
+
+			ImGui::SetDragDropPayload(PayloadName.c_str(), &Data, sizeof(DragDropData));
+		}
+		else 
+		{
+			Data.FileName = FilePath;
+			ImGui::SetDragDropPayload("OTHR", &Data, sizeof(DragDropData));
+			GUIManager->DnDType = EDragDropType::File;
+		}
+	}
+	else
+	{
+		if (FilePath == ".." || !InitFileName.IsDir || FilePath.xstring().find_last_of("/\\") == xr_string::npos || !ImGui::BeginDragDropSource())
+		{
+			return false;
+		}
+
+		Data.FileName = FilePath;
+		GUIManager->DnDType = EDragDropType::Folder;
+		ImGui::SetDragDropPayload("FLDR", &Data, sizeof(DragDropData));
+	}
+
+	xr_string LabelText = FilePath.has_extension() ? FileName.substr(0, FileName.length() - FilePath.extension().string().length()).c_str() : FileName.c_str();
+	if (SelectedObjects.size() == 1) 
+	{
+		ImGui::ImageButton(FilePath.xfilename().c_str(), IconPtr->Icon->get_SRView() ? IconPtr->Icon->get_SRView()->GetRawSRV() : nullptr, BtnSize);
+		ImGui::TextUnformatted(LabelText.data());
+	}
+	else 
+	{
+		ImGui::ImageButton(FilePath.xfilename().c_str(), Icons["multi"].Icon->get_SRView()->GetRawSRV(), BtnSize);
+		ImGui::Text("%zu objects", SelectedObjects.size());
+	}
+	
+	ImGui::EndDragDropSource();
+	return true; 
+}
+
+bool CContentView::DrawItemHelper(xr_path& FilePath, xr_string& FileName, const CContentView::FileOptData& InitFileName, CContentView::IconData* IconPtr, bool isSelected)
+{
+	if (!DrawContext(FilePath))
+	{
+		if (ViewMode == EViewMode::Tile && ImGui::IsItemHovered())
+		{
+			ImVec2 DrawHintPos = ImGui::GetMousePos() - ImGui::GetWindowPos() + ImVec2{ ImGui::GetScrollX(), ImGui::GetScrollY() };
+			DrawHintPos.y -= 15;
+			CurrentItemHint = { Platform::ANSI_TO_UTF8(FileName) ,DrawHintPos, true };
+		}
+	}
+
+	if (!isSelected)
+	{
+		AcceptDragDropAction(InitFileName);
+	}
+
+	return BeginDragDropAction(FilePath, FileName, InitFileName, IconPtr);
+}
+
+bool CContentView::DrawItemN(const FileOptData& InitFileName, size_t& HorBtnIter, const size_t IterCount)
+{
+	if (InitFileName.File.empty())
+	{
+		return false;
+	}
+
+	const ImGuiStyle& style = ImGui::GetStyle();
+
+	xr_path FilePath = InitFileName.File;
+	xr_string FileName = FilePath.xfilename();
+	bool inSelectedList = false;
+	bool isClicked = false;
+
+	bool isRenaming = RenameObject.Path == FilePath;
+
+	if (FileName.empty())
+	{
+		return false;
+	}
+
+	if (ViewMode == EViewMode::List)
+	{
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+	}
+
+	const ImVec2& CursorPos = ImGui::GetCursorPos();
+	auto InvalidateLambda = [&FileName, this, &CursorPos, &HorBtnIter, IterCount]()
+	{
+		if (HorBtnIter != IterCount)
+		{
+			ImGui::SetCursorPosY(CursorPos.y);
+			ImGui::SetCursorPosX(CursorPos.x + 15 + BtnSize.x);
+			HorBtnIter++;
+		}
+		else
+		{
+			HorBtnIter = 0;
+		}
+	};
+	int padding = 10;
+
+	ImVec2 ImageSize = BtnSize;
+
+	ImVec2 buttonSize
+	{
+		ImageSize.x + padding,
+		ImageSize.y + (ViewMode == EViewMode::Tile ? padding + 10 : padding)
+	};
+
+	IconData* IconPtr = nullptr;
+
+	if (InitFileName.IsDir)
+	{
+		IconPtr = &GetTexture("Folder");
+	}
+	else if (InitFileName.ISESect.size() > 0)
+	{
+		xr_string HackName = InitFileName.ISESect.c_str(); HackName += ".ise";
+		IconPtr = &GetTexture(HackName.c_str());
+	}
+	else
+	{
+		IconPtr = &GetTexture(FilePath);
+	}
+
+	if (!IconPtr->Icon)
+		return false;
+
+	const ImVec4* colors = style.Colors;
+	ImVec4 IconColor = XRay::ImGui::GetEditorColor(XRay::ImGui::EEditorColors::ContentIconTint);
+
+	xr_string ButtonId = "##";
+	ButtonId += FileName;
+
+	ImVec2 availableSpace = ImGui::GetContentRegionAvail();
+
+	if (ViewMode == EViewMode::List || Contains(buttonSize))
+	{
+		ImGui::PushStyleColor(ImGuiCol_Button, XRay::ImGui::GetEditorColor(XRay::ImGui::EEditorColors::PanelTint).Value);
+		if (!SelectedObjects.empty() && std::find(SelectedObjects.begin(), SelectedObjects.end(), FilePath) != SelectedObjects.end())
+		{
+			inSelectedList = true;
+			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.f, 1.f, 1.f, 0.5f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.f, 1.f, 1.f, 0.5f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.f, 1.f, 1.f, 0.5f));
+		}
+
+		const bool IsSoundFile = !InitFileName.IsDir && CSoundPreviewCache::IsPreviewable(FilePath);
+
+		ImGui::BeginGroup();
+		{
+			if (ViewMode == EViewMode::List)
+				ImGui::Dummy(ImVec2(0, padding / 2));
+			
+			if (IsSoundFile)
+				ImGui::SetNextItemAllowOverlap();
+
+			if (ImGui::Button(ButtonId.c_str(), ImVec2(buttonSize.x, (isRenaming && ViewMode == EViewMode::Tile) ? buttonSize.y - 20: buttonSize.y)))
+			{
+				ImGuiIO& io = ImGui::GetIO();
+
+				if (!io.KeyCtrl)
+				{
+					SelectedObjects.clear();
+				}
+
+				if (inSelectedList && io.KeyCtrl)
+					SelectedObjects.erase(std::find(SelectedObjects.begin(), SelectedObjects.end(), FilePath));
+				else if (FileName != "..")
+					SelectedObjects.push_back(FilePath);
+			}
+
+			isClicked = ImGui::IsMouseDoubleClicked(0) && ImGui::IsItemActive();
+
+			DrawItemHelper(FilePath, FileName, InitFileName, IconPtr, inSelectedList);
+
+			ImVec2 cursorPos = ImGui::GetItemRectMin();
+			ImVec2 tileMax = ImGui::GetItemRectMax();
+			ImVec2 imagePos = ImVec2(
+				cursorPos.x + (buttonSize.x - ImageSize.x) / 2,
+				cursorPos.y + (ViewMode == EViewMode::Tile ? 0 : (buttonSize.y - ImageSize.y) / 2)
+			);
+			ImGui::SetCursorScreenPos(imagePos);
+			
+			if (std::find(CopiedObjects.begin(), CopiedObjects.end(), FilePath) != CopiedObjects.end() && IsCutting || ImGui::IsItemActive() &&
+				ImGui::IsMouseDragging(ImGuiMouseButton_Left) && ImGui::GetDragDropPayload() != nullptr)
+			{
+				if (!inSelectedList)
+				{
+					if (SelectedObjects.size() != 0)
+						SelectedObjects.clear();
+
+					SelectedObjects.push_back(FilePath);
+				}
+				IconColor.w = 0.3;
+			}
+
+			if (!IsSoundFile || !DrawSoundPreview(FilePath, cursorPos, tileMax, ImageSize, IconColor.w))
+			{
+				ImGui::Image(IconPtr->Icon->get_SRView() ? IconPtr->Icon->get_SRView()->GetRawSRV()  : nullptr, ImageSize, ImVec2(0, 0), ImVec2(1, 1), IconColor, ImVec4(0,0,0,0));
+			}
+
+			/*
+				Два варианта
+					Во втором попытка уменьшить обращения к ImGui API увел. шагом проходки
+			*/
+			ImVec2 textSize;
+			xr_string LabelText = FilePath.has_extension()
+				? FileName.substr(0, FileName.length() - FilePath.extension().string().length())
+				: FileName;
+
+			if (!isRenaming)
+			{
+				if (ViewMode == EViewMode::Tile)
+				{
+					textSize = ImGui::CalcTextSize(Platform::ANSI_TO_UTF8(LabelText).data());
+					float textWidth = textSize.x;
+
+					while (textWidth > buttonSize.x - padding)
+					{
+						LabelText = LabelText.substr(0, LabelText.length() - 4) + "..";
+						textWidth = ImGui::CalcTextSize(Platform::ANSI_TO_UTF8(LabelText).data()).x;
+					}
+					textSize.x = textWidth;
+				}
+				else
+				{
+					textSize = ImGui::CalcTextSize(Platform::ANSI_TO_UTF8(LabelText).data());
+				}
+			}
+
+			float TextPosY = ImageSize.y;
+
+			xr_string ExtDescription = "";
+
+			if (ViewMode == EViewMode::List)
+			{
+				if (InitFileName.IsDir)
+				{
+					ExtDescription = ExtDesc["_dir"];
+				}
+				else if (InitFileName.File.xstring().ends_with(".xml"))
+				{
+					xr_string FileName = InitFileName.File.xfilename();
+					FileName = FileName.substr(0, FileName.size() - 4);
+
+					auto Iter = std::find(GameDialogs.begin(), GameDialogs.end(), FileName);
+					if (Iter != GameDialogs.end())
+					{
+						ExtDescription = ExtDesc["dialogs"];
+					}
+				}
+				else if (FilePath.extension().string() == ".ltx")
+				{
+					xr_string PathName = FilePath;
+					ExtDescription = (PathName.Contains("scripts\\") ? ExtDesc["_script_ltx"] : ExtDesc[".ltx"]) ;
+				}
+				else
+					ExtDescription = ExtDesc[FilePath.extension().string().c_str()];
+
+				TextPosY = ImageSize.y < 18 ? (buttonSize.y - textSize.y) / 2 : (padding)/2;
+			}
+
+			ImVec2 scrPos = ImVec2(
+				cursorPos.x + (ViewMode == EViewMode::Tile ? (buttonSize.x - textSize.x) / 2 : padding * 2 + ImageSize.x),
+				cursorPos.y + TextPosY
+			);
+
+			ImGui::SetCursorScreenPos(scrPos);
+
+
+			if (isRenaming)
+			{
+				if (RenameObject.Active)
+				{
+					if (RenameObject.SetText)
+					{
+						RenameObject.SetText = false;
+						RenameObject.RenameBuf = Platform::ANSI_TO_UTF8(LabelText);
+						ImGui::SetKeyboardFocusHere();
+
+						SelectedObjects.clear();
+						SelectedObjects.push_back(FilePath);
+					}
+
+					ImGuiIO& io = ImGui::GetIO();
+
+					if (ViewMode == EViewMode::Tile)
+					{
+						ImGui::SetCursorPosX(CursorPos.x);
+						ImGui::SetNextItemWidth(buttonSize.x);
+					}
+
+					if (ImGui::InputText("##ren", RenameObject.RenameBuf.data(), 255, ImGuiInputTextFlags_EnterReturnsTrue))
+						RenameObject.Active = false;
+					//<IX> TODO: FIX ME 
+					//if (io.KeysDown[ImGuiKey_Escape])
+					//	RenameActionEnd();
+
+					RenameObject.Focus = ImGui::IsItemHovered();
+				}
+				else
+				{
+					if (strcmp(Platform::ANSI_TO_UTF8(LabelText).c_str(), RenameObject.RenameBuf.c_str()))
+						RenameAction(FilePath, RenameObject.RenameBuf.c_str());
+
+					RenameActionEnd();
+				}
+			}
+			else
+			{
+				ImGui::TextUnformatted(LabelText.c_str());
+
+				if (ImGui::IsMouseReleased(0) && ImGui::IsItemHovered())
+				{
+					if (FilePath.xstring() != ".." && !FilePath.parent_path().empty() && !IsSpawnElement)
+						RenameActionActivate(FilePath);
+				}
+			}
+
+			if (ViewMode == EViewMode::List)
+			{
+
+				ImVec4 TooltipTextColor = ImGui::GetStyle().Colors[ImGuiCol_Text];
+				TooltipTextColor.w *= 0.5f;
+
+				ImGui::SetCursorScreenPos(ImVec2(scrPos.x, ImGui::GetCursorScreenPos().y));
+
+				if (ExtDescription.empty())
+				{
+					
+					ExtDescription = InitFileName.File.extension().string().c_str();
+					ExtDescription += " File";
+					
+				}
+
+				if (!isRenaming)
+				{
+					ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2);
+				}
+
+				ImGui::TextColored(TooltipTextColor, ExtDescription.c_str());
+
+				ImGui::SetCursorScreenPos(ImVec2(
+					cursorPos.x,
+					cursorPos.y + buttonSize.y
+				));
+				ImGui::Dummy(ImVec2(0, padding/2));
+				ImGui::Separator();
+			}
+		}
+		ImGui::EndGroup();
+
+		if (inSelectedList)
+			ImGui::PopStyleColor(3);
+
+		ImGui::PopStyleColor();
+	}
+	else
+	{
+		ImGui::Button(ButtonId.c_str(), buttonSize);
+		InvalidateLambda();
+		return false;
+	}
+
+	if (ViewMode == EViewMode::Tile)
+	{
+		InvalidateLambda();
+
+		if (availableSpace.x - ImGui::GetCursorPosX() - buttonSize.x > buttonSize.x + style.ItemSpacing.x)
+			ImGui::SameLine();
+	}
+	else if (ViewMode == EViewMode::List)
+		ImGui::PopStyleVar();
+
+	return isClicked;
+}
+
+bool CContentView::Contains(const ImVec2& ButtonSize)
+{
+	float ScrollValue = ImGui::GetScrollY();
+	float CursorPosY = ImGui::GetCursorPosY();
+
+	bool IsNotAfter = CursorPosY < ScrollValue + ImGui::GetWindowSize().y;
+	bool IsNotBefor = CursorPosY > ScrollValue - ButtonSize.y;
+	return IsNotAfter && IsNotBefor;
+}
+
+
+bool CContentView::CheckFile(const xr_path& File) const
+{
+	if (File.has_extension())
+	{
+		xr_string Ext = File.extension().string().c_str();
+
+		bool TestTHM = IsThmMode   || Ext != ".thm";
+		bool TestTemp = IsTempMode || !Ext.StartWith(".~");
+		bool TestWinTrash = File.xfilename() != "desktop.ini";
+		bool TestSoundCache = Ext != ".sch";
+
+		return TestTemp && TestTHM && TestWinTrash && TestSoundCache;
+	}
+
+	return true;
+}
+
+bool CContentView::DrawFormContext()
+{
+	if (!ImGui::BeginPopupContextItem("##contentbrowsercontext"))
+	{
+		return false;
+	}
+
+	ImGui::BeginDisabled(CopiedObjects.empty());
+	if (ImGui::MenuItem("Paste"))
+	{
+		PasteAction(CurrentDir);
+	}
+	ImGui::EndDisabled();
+
+	ImGui::Separator();
+
+	if (ImGui::MenuItem("Create Folder"))
+	{
+		CreateAction();
+	}
+
+	ImGui::EndPopup();
+	return true;
+}
+
+bool CContentView::DrawContext(const xr_path& Path)
+{
+	if (Path.xstring() == ".." || Path.parent_path().empty() || !ImGui::BeginPopupContextItem())
+	{
+		return false;
+	}
+
+	if (Path.has_extension())
+	{
+		if (Path.extension().string() == ".object")
+		{
+			if (ImGui::MenuItem("Open"))
+			{
+				CViewportMesh* MeshView = new CViewportMesh;
+				MeshView->OpenModel(Path);
+
+				EContext.UI->Push(MeshView);
+			}
+		}
+		else if (Path.extension().string() == ".ltx" || Path.extension().string() == ".script")
+		{
+			if (ImGui::MenuItem("Open in VSCode"))
+			{
+#ifdef IXR_WINDOWS
+				ShellExecuteA(
+					nullptr,
+					"open",
+					"code",
+					("\"" + Path.xstring() + "\"").c_str(),
+					nullptr,
+					SW_HIDE
+				);
+#elif defined(IXR_MACOS)
+				xr_string cmd = "open -a \"Visual Studio Code\" \"" + Path.xstring() + "\"";
+				system(cmd.c_str());
+#else
+				xr_string cmd = "code \"" + Path.xstring() + "\"";
+				system(cmd.c_str());
+#endif
+			}
+		}
+		else if (Path.extension().string() == ".pg" || Path.extension().string() == ".pe")
+		{
+			if (ImGui::MenuItem("Open"))
+			{
+				CViewportParticle* MeshView = new CViewportParticle;
+				void* Ptr = ParticlesCache[Path.xstring()];
+
+				if (Path.extension().string() == ".pg")
+				{
+					MeshView->OpenModel((PS::CPGDef*)Ptr);
+				}
+				else
+				{
+					MeshView->OpenModel((PS::CPEDef*)Ptr);
+				}
+
+				EContext.UI->Push(MeshView);
+			}
+		}
+		else if (Path.extension().string() == ".level")
+		{
+			if (ImGui::MenuItem("Open"))
+			{
+				EContext.UI->SetStatus("Level loading...");
+				ExecCommand(COMMAND_CLEAR);
+				FS.TryLoad(Path.xstring());
+				IReader* R = FS.r_open(Path.xstring().c_str());
+				if (!R)
+				{
+					ImGui::EndPopup();
+					return false;
+				}
+				char ch;
+				R->r(&ch, sizeof(ch));
+				bool is_ltx = (ch == '[');
+				FS.r_close(R);
+				bool res;
+				LTools->m_LastFileName = Path.xstring();
+
+				if (is_ltx)
+					Scene->LoadLTX(Path.xstring().c_str(), false);
+				else
+					Scene->Load(Path.xstring().c_str(), false);
+			}
+			ImGui::Separator();
+		}
+	}
+
+	if (Path.has_extension())
+	{
+		if (Path.extension().string() == ".wav")
+		{
+			if (ImGui::MenuItem("Open"))
+			{
+				ExecCommand(COMMAND_SOUND_EDITOR, xr_path(Path.stem()).xstring());
+			}
+		}
+		else if (Path.extension().string() == ".dds")
+		{
+			if (ImGui::MenuItem("Open"))
+			{
+				CUITextureViewer* TexView = new CUITextureViewer;
+				TexView->LoadFromFile(Path);
+
+				EContext.UI->Push(TexView);
+			}
+		}
+		ImGui::Separator();
+	}
+
+	if (ImGui::MenuItem("Show in Explorer"))
+	{
+#ifdef IXR_WINDOWS
+		ShellExecuteA(
+			nullptr,
+			"open",
+			"explorer",
+			("/select,\"" + Path.xstring() + "\"").c_str(),
+			nullptr,
+			SW_SHOW
+		);
+#elif defined(IXR_MACOS)
+		xr_string cmd = "open -R \"" + Path.xstring() + "\"";
+		system(cmd.c_str());
+#else
+		xr_string cmd = "xdg-open \"" + Path.parent_path().xstring() + "\"";
+		system(cmd.c_str());
+#endif
+	}
+	ImGui::Separator();
+
+
+	if (ImGui::MenuItem("Cut"))
+	{
+		if (SelectedObjects.empty())
+			SelectedObjects.push_back(Path);
+
+		CutAction();
+	}
+
+	if (ImGui::MenuItem("Copy"))
+	{
+		if (SelectedObjects.empty())
+			SelectedObjects.push_back(Path);
+
+		CopyAction();
+	}
+
+	if (ImGui::MenuItem("Rename"))
+	{
+		RenameActionActivate(Path);
+	}
+
+	if (ImGui::MenuItem("Delete"))
+	{
+		if (SelectedObjects.empty())
+		{
+			DeleteAction(Path);
+		}
+		else
+		{
+			for (const xr_path& obj : SelectedObjects)
+			{
+				DeleteAction(obj);
+			}
+			SelectedObjects.clear();
+		}
+	}
+
+	ImGui::Separator();
+
+	if (ImGui::BeginMenu("Properties"))
+	{
+		if (ImGui::MenuItem("Change icon"))
+		{
+			ExecCommand(COMMAND_ICON_PICKER, Path.xstring());
+		}
+
+		ImGui::EndMenu();
+	}
+
+	bool ShowConvert = false;
+
+	const xr_set<xr_string> supportedExtensionsConvert = { ".dds", ".tga", ".png", ".wav" };
+
+	if (Path.has_extension() && supportedExtensionsConvert.count(xr_path(Path.extension()).xstring()) > 0)
+	{
+		ImGui::Separator();
+
+		if (auto ex = xr_path(Path.extension()).xstring(); ImGui::BeginMenu("Convert"))
+		{
+			if ((ex == ".dds" || ex == ".png") && ImGui::MenuItem("TGA"))
+			{
+				xr_path OutFile = Path;
+				OutFile.replace_extension(".tga");
+
+				DXTUtils::Converter::MakeTGA(Path, OutFile);
+
+			}
+
+			if ((ex == ".dds" || ex == ".tga") && ImGui::MenuItem("PNG"))
+			{
+				xr_path OutFile = Path;
+				OutFile.replace_extension(".png");
+
+				DXTUtils::Converter::MakePNG(Path, OutFile);
+			}
+
+			if (ex == ".wav" && ImGui::MenuItem("OGG"))
+			{
+				xr_path OutFile = Path;
+				OutFile.replace_extension(".ogg");
+				
+				xr_string stem = xr_path(Path.stem());
+				ESoundThumbnail* pTHM = new ESoundThumbnail(stem.c_str());
+				
+				SndLib->MakeGameSound(pTHM, Path.xstring().c_str(), OutFile.xstring().c_str());
+				xr_delete(pTHM);
+			}
+
+			ImGui::EndMenu();
+		}
+	}
+
+	ImGui::EndPopup();
+	return true;
+}
+
+CContentView::IconData & CContentView::GetTexture(const xr_string & IconPath)
+{
+	if (Icons.contains(IconPath))
+		return Icons[IconPath];
+
+	if (IconPath.Contains(".~"))
+		return Icons["backup"];
+
+	if (IconPath.ends_with(".ltx"))
+		return Icons["thm"];
+	
+	if (IconPath.ends_with(".ogg"))
+		return Icons["ogg"];
+	
+	if (IconPath.ends_with(".level"))
+		return Icons["level"];
+	
+	if (IconPath.ends_with(".wav"))
+		return Icons["wav"];
+	
+	if (IconPath.ends_with(".xml"))
+	{
+		xr_string FileName = xr_path(IconPath).xfilename();
+		FileName = FileName.substr(0, FileName.size() - 4);
+
+		auto Iter = std::find(GameDialogs.begin(), GameDialogs.end(), FileName);
+		if (Iter != GameDialogs.end())
+		{
+			return Icons["dialogs"];
+		}
+	}
+
+	if (IconPath.ends_with(".seq"))
+		return Icons["seq"];
+
+	if (IconPath.ends_with(".dll"))
+		return Icons["dll"];
+
+	if (IconPath.ends_with(".exe"))
+		return Icons["exe"];
+
+	if (IconPath.ends_with("$") && IconPath.starts_with("$"))
+		return Icons["Folder"];
+
+	if (IconPath.ends_with(".cmd") ||
+		IconPath.ends_with(".bat"))
+		return Icons["cmd"];
+	
+	if (IconPath.Contains(LogsDir))
+		return Icons["logs"];
+
+	if (!Icons.contains(IconPath))
+	{
+		if (IconPath.ends_with(".ise"))
+		{
+			if (IconPath == "$env_mod.ise")
+			{
+				return Icons["env_mod"];
+			}
+
+			ESceneSpawnTool* SpTool = (ESceneSpawnTool*)Scene->GetTool(OBJCLASS_SPAWNPOINT);
+			xr_string ValidPath = IconPath;
+			ValidPath = ValidPath.erase(ValidPath.length() - 4);
+
+			if (pSettings->line_exist(ValidPath.data(), "$ed_icon"))
+			{
+				Icons[IconPath] = { DEV->_CreateTexture(pSettings->r_string_wb(ValidPath.data(), "$ed_icon").c_str()), false };
+				Icons[IconPath].Icon->Load();
+			}
+			else
+			{
+				Icons[IconPath] = Icons["file"];
+			}
+		}
+		else if (IconPath.ends_with(".object"))
+		{
+			string_path fn = {};
+			FS.update_path(fn, _objects_, fn);
+			Icons[IconPath] = Icons["object"];
+
+			if(IconPath.find(fn) != xr_string::npos) {
+				xr_string NewPath = IconPath.substr(IconPath.find(fn) + xr_strlen(fn));
+
+				EObjectThumbnail* m_Thm = (EObjectThumbnail*)ImageLib.CreateThumbnail(NewPath.data(), EImageThumbnail::ETObject);
+				CTexture* TempTexture = new CTexture();
+
+				IRHISurface* Texture = nullptr;
+				m_Thm->Update(Texture);
+				TempTexture->surface_set(Texture);
+
+				if(TempTexture->pSurface != nullptr && TempTexture->get_SRView() != nullptr)
+				{
+					Icons[IconPath] = {TempTexture, false};
+					Texture->Release();
+				}
+				else 
+				{
+					xr_delete(TempTexture);
+				}
+			}
+		}
+		else if (IconPath.ends_with(".group"))
+		{
+			string_path fn = {};
+			FS.update_path(fn, _groups_, "");
+			Icons[IconPath] = Icons["object"];
+
+			if (IconPath.find(fn) != xr_string::npos)
+			{
+				xr_string NewPath = IconPath.substr(IconPath.find(fn) + xr_strlen(fn));
+
+				EGroupThumbnail* m_Thm = new EGroupThumbnail(NewPath.data());
+				CTexture* TempTexture = new CTexture();
+
+				IRHISurface* Texture = nullptr;
+				m_Thm->Update(Texture);
+				TempTexture->surface_set(Texture);
+
+				if (TempTexture->pSurface != nullptr && TempTexture->get_SRView()->GetRawSRV() != nullptr)
+				{
+					Icons[IconPath] = { TempTexture, false };
+					Texture->Release();
+				}
+				else
+				{
+					xr_delete(TempTexture);
+				}
+			}
+		}
+		else if (IconPath.ends_with(".png") || IconPath.ends_with(".tga"))
+		{
+			U8Vec Pixels = DXTUtils::GitPixels(IconPath.c_str(), BtnSize.x, BtnSize.y);
+
+			if (!Pixels.empty())
+			{
+				CTexture* TempTexture = new CTexture();
+				Icons[IconPath] = { TempTexture, false };
+
+				RHITextureDesc Desc;
+				Desc.Width = BtnSize.x;
+				Desc.Height = BtnSize.x;
+				Desc.Format = ERHI_FORMAT::B8G8R8A8_UNORM;
+				Desc.MipLevels = 1;
+				Desc.ArraySize = 1;
+				Desc.Usage = ERHI_USAGE::USAGE_DEFAULT;
+				Desc.BindFlags = ERHI_BIND_FLAG::SHADER_RESOURCE;
+
+				RHISubResource SubResource{};
+				SubResource.Data = Pixels.data();
+				SubResource.DataSize = BtnSize.x * 4;
+
+				IRHISurface* Surf = GRHI->CreateTexture2D(Desc, SubResource);
+				TempTexture->surface_set(Surf);
+				Surf->Release();
+			}
+			else if (IconPath.ends_with(".tga"))
+			{
+				Icons[IconPath] = Icons["tga"];
+			}
+		}
+		else if(IconPath.ends_with(".dds")) 
+		{
+			xr_string NewPath = IconPath.substr(0, IconPath.length() - 4);
+
+			Icons[IconPath] = {DEV->_CreateTexture(NewPath.c_str()), false};
+			Icons[IconPath].Icon->Load();
+
+			if(!Icons[IconPath].Icon->pSurface)
+			{
+				Icons[IconPath] = Icons["image"];
+			}
+		}
+		else
+		{
+			Icons[IconPath] = Icons["file"];
+		}
+	}
+
+	return Icons[IconPath];
+}
+
+void CContentView::UpdateSoundPreview()
+{
+	// The mixer starts the slot asynchronously, so give it a moment before treating "not playing" as finished
+	if (!PreviewSoundFile.empty() && !PreviewSound.is_playing() && PreviewSoundTimer.GetElapsed_sec() > 0.25f)
+	{
+		StopSoundPreview();
+	}
+}
+
+void CContentView::StopSoundPreview()
+{
+	if (PreviewSound._p)
+	{
+		PreviewSound.stop();
+		PreviewSound.destroy();
+	}
+
+	PreviewSoundFile.clear();
+}
+
+void CContentView::ToggleSoundPreview(const xr_path& FilePath, const xr_string& SoundName)
+{
+	const bool WasPlaying = PreviewSoundFile == FilePath;
+	StopSoundPreview();
+
+	if (WasPlaying)
+	{
+		return;
+	}
+
+	PreviewSound.create(SoundName.c_str(), st_Effect, sg_Undefined);
+	if (!PreviewSound._p)
+	{
+		return;
+	}
+
+	PreviewSound.play(nullptr, sm_2D);
+	PreviewSoundFile = FilePath;
+	PreviewSoundTimer.Start();
+}
+
+bool CContentView::DrawSoundPreview(const xr_path& FilePath, const ImVec2& TileMin, const ImVec2& TileMax, const ImVec2& ImageSize, float Alpha)
+{
+	const CSoundPreviewCache::Preview* Preview = SoundPreviews.Get(FilePath);
+	if (Preview == nullptr)
+	{
+		return false;
+	}
+
+	const ImVec2 Min = ImGui::GetCursorScreenPos();
+	const ImVec2 Max = Min + ImageSize;
+	ImGui::Dummy(ImageSize);
+
+	const bool IsPlaying = PreviewSoundFile == FilePath;
+	float Progress = -1.0f;
+	if (IsPlaying && Preview->Duration > 0.0f)
+	{
+		Progress = std::clamp(XRay::Sound::Mixer::GetPlaytime(PreviewSound.slot()) / Preview->Duration, 0.0f, 1.0f);
+	}
+
+	const u8 A = u8(std::clamp(Alpha, 0.0f, 1.0f) * 255.0f);
+	const ImU32 BackgroundColor = IM_COL32(22, 22, 26, A);
+	const ImU32 CenterColor = IM_COL32(255, 255, 255, A / 10);
+	const ImU32 WaveColor = IM_COL32(124, 112, 232, Progress < 0.0f ? A : A / 2);
+	const ImU32 PlayedColor = IM_COL32(196, 188, 255, A);
+	const ImU32 AssetColor = IM_COL32(97, 85, 212, A);
+
+	ImDrawList* DrawList = ImGui::GetWindowDrawList();
+	DrawList->AddRectFilled(Min, Max, BackgroundColor, 3.0f);
+
+	const float StripHeight = ImageSize.y >= 32.0f ? 3.0f : 1.0f;
+	const float WaveTop = Min.y + 2.0f;
+	const float WaveBottom = Max.y - StripHeight - 2.0f;
+	const float LaneHeight = (WaveBottom - WaveTop) / float(Preview->Lanes);
+	const int Columns = std::max(1, int(ImageSize.x) - 4);
+	const float PlayheadX = Min.x + 2.0f + Progress * float(Columns);
+
+	for (u16 Lane = 0; Lane < Preview->Lanes; Lane++)
+	{
+		const float Center = WaveTop + LaneHeight * (float(Lane) + 0.5f);
+		const float HalfHeight = LaneHeight * 0.5f - 1.0f;
+		const CSoundPreviewCache::PeakRange* Peaks = Preview->Peaks.data() + (size_t)Lane * CSoundPreviewCache::PeakCount;
+
+		DrawList->AddLine(ImVec2(Min.x + 2.0f, Center), ImVec2(Max.x - 2.0f, Center), CenterColor);
+
+		for (int Column = 0; Column < Columns; Column++)
+		{
+			const u32 First = u32(Column * CSoundPreviewCache::PeakCount / Columns);
+			const u32 Last = std::max(First + 1, u32((Column + 1) * CSoundPreviewCache::PeakCount / Columns));
+
+			float PeakMin = 0.0f;
+			float PeakMax = 0.0f;
+			for (u32 Peak = First; Peak < Last && Peak < CSoundPreviewCache::PeakCount; Peak++)
+			{
+				PeakMin = std::min(PeakMin, Peaks[Peak].Min);
+				PeakMax = std::max(PeakMax, Peaks[Peak].Max);
+			}
+
+			const float X = Min.x + 2.0f + float(Column) + 0.5f;
+			const float Top = Center - std::max(PeakMax * HalfHeight, 0.5f);
+			const float Bottom = Center - std::min(PeakMin * HalfHeight, -0.5f);
+			DrawList->AddLine(ImVec2(X, Top), ImVec2(X, Bottom), (Progress >= 0.0f && X <= PlayheadX) ? PlayedColor : WaveColor);
+		}
+	}
+
+	DrawList->AddRectFilled(ImVec2(Min.x, Max.y - StripHeight), Max, AssetColor, 3.0f, ImDrawFlags_RoundCornersBottom);
+
+	if (Progress >= 0.0f)
+	{
+		DrawList->AddLine(ImVec2(PlayheadX, WaveTop), ImVec2(PlayheadX, WaveBottom), IM_COL32(255, 255, 255, A), 1.5f);
+	}
+
+	if (ImageSize.y >= 48.0f)
+	{
+		const float Time = Progress >= 0.0f ? Progress * Preview->Duration : Preview->Duration;
+		string32 TimeText = {};
+		xr_sprintf(TimeText, "%d:%04.1f", int(Time) / 60, fmodf(Time, 60.0f));
+
+		const ImVec2 TextSize = ImGui::CalcTextSize(TimeText);
+		const ImVec2 TextPos(Max.x - TextSize.x - 4.0f, Max.y - StripHeight - TextSize.y - 2.0f);
+		DrawList->AddRectFilled(TextPos - ImVec2(2.0f, 0.0f), TextPos + TextSize + ImVec2(2.0f, 0.0f), IM_COL32(0, 0, 0, A / 2), 2.0f);
+		DrawList->AddText(TextPos, IM_COL32(230, 230, 230, A), TimeText);
+	}
+
+	const bool TileHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && ImGui::IsMouseHoveringRect(TileMin, TileMax);
+	if (!TileHovered && !IsPlaying)
+	{
+		return true;
+	}
+
+	xr_string SoundName;
+	if (Preview->SampleRate != SND_SAMPLERATE || !SoundPreviews.GetGameSoundName(FilePath, SoundName))
+	{
+		return true;
+	}
+
+	const float Radius = std::clamp(std::min(ImageSize.x, ImageSize.y) * 0.2f, 7.0f, 18.0f);
+	const ImVec2 ButtonCenter = Min + ImageSize * 0.5f;
+	const ImVec2 CursorBackup = ImGui::GetCursorScreenPos();
+
+	ImGui::SetCursorScreenPos(ButtonCenter - ImVec2(Radius, Radius));
+	ImGui::PushID(FilePath.xstring().c_str());
+	if (ImGui::InvisibleButton("##SoundPreviewPlay", ImVec2(Radius * 2.0f, Radius * 2.0f)))
+	{
+		ToggleSoundPreview(FilePath, SoundName);
+	}
+	const bool ButtonHovered = ImGui::IsItemHovered();
+	ImGui::PopID();
+	ImGui::SetCursorScreenPos(CursorBackup);
+
+	const ImU32 ButtonColor = ButtonHovered ? IM_COL32(97, 85, 212, 235) : IM_COL32(0, 0, 0, 170);
+	DrawList->AddCircleFilled(ButtonCenter, Radius, ButtonColor);
+	DrawList->AddCircle(ButtonCenter, Radius, IM_COL32(255, 255, 255, ButtonHovered ? 255 : 190), 0, 1.5f);
+
+	const float IconSize = Radius * 0.45f;
+	if (PreviewSoundFile == FilePath)
+	{
+		DrawList->AddRectFilled(ButtonCenter - ImVec2(IconSize, IconSize) * 0.8f, ButtonCenter + ImVec2(IconSize, IconSize) * 0.8f, IM_COL32_WHITE, 1.0f);
+	}
+	else
+	{
+		const ImVec2 Offset(IconSize * 0.2f, 0.0f);
+		DrawList->AddTriangleFilled(
+			ButtonCenter + Offset + ImVec2(-IconSize * 0.8f, -IconSize),
+			ButtonCenter + Offset + ImVec2(-IconSize * 0.8f, IconSize),
+			ButtonCenter + Offset + ImVec2(IconSize, 0.0f),
+			IM_COL32_WHITE);
+	}
+
+	return true;
+}
+
+xr_map<xr_string, CContentView::FileOptData> CContentView::ScanConfigs(const xr_string& StartPath)
+{
+	xr_map<xr_string, FileOptData> TempPath;
+	CInifile::Root& sections = pSettings->sections();
+	for (CInifile::Sect& sect : sections)
+	{
+		const char* val;
+		if (sect.line_exist("$spawn", &val))
+		{
+			shared_str& sect_name = sect.Name;
+			shared_str caption = pSettings->r_string_wb(sect_name, "$spawn");
+			if (caption.size())
+			{
+				xr_string FileName = caption.c_str();
+
+				if (!FileName.Contains(StartPath) && !StartPath.empty())
+					continue;
+
+				if (FileName == StartPath)
+					continue;
+
+				if (StartPath.empty())
+				{
+					size_t DirStart = FileName.find('\\');
+
+					if (DirStart != xr_string::npos)
+					{
+						xr_string DirName = FileName.substr(0, DirStart);
+						if (TempPath.contains(DirName))
+							continue;
+
+						TempPath[DirName] = { DirName.c_str(), true };
+						continue;
+					}
+				}
+				else
+				{
+					xr_string Delimer = StartPath;
+					if (!Delimer.ends_with('\\'))
+					{
+						Delimer += '\\';
+					}
+
+					size_t DirStart = FileName.find(Delimer);
+
+					if (DirStart != xr_string::npos)
+					{
+						xr_string DirName = FileName.substr(DirStart + Delimer.length());
+						if (TempPath.contains(DirName))
+							continue;
+
+						int DirIter = DirName.find('\\');
+						if (DirIter != xr_string::npos)
+						{
+							xr_string ExtractedDirName = DirName.substr(0, DirIter);
+							TempPath[ExtractedDirName] = { ExtractedDirName.c_str(), true };
+						}
+						else
+						{
+							TempPath[DirName] = { (DirName + ".ise").c_str(), false, sect_name };
+						}
+					}
+
+					continue;
+				}
+
+				TempPath[FileName] = { (FileName + ".ise").c_str(), false, sect_name };
+			}
+		}
+	}
+
+	return std::move(TempPath);
+}
+
+#pragma region ObjectActions
+
+void CContentView::CheckFileNameRecursive(xr_path& FilePath, const xr_string& postfix) const
+{
+	xr_path NewFileName = FilePath.stem();
+	NewFileName += " - ";
+	NewFileName += postfix.c_str();
+	NewFileName += FilePath.extension();
+
+	FilePath.replace_filename(NewFileName);
+	if (std::filesystem::exists(FilePath))
+	{
+		CheckFileNameRecursive(FilePath, postfix);
+	}
+
+	return;
+}
+
+void CContentView::PasteAction(const xr_string& Path) /*const*/
+{
+	xr_path OutPath = Path;
+	if (Path != ".." && !std::filesystem::is_directory(OutPath))
+	{
+		OutPath = OutPath.parent_path();
+	}
+
+	xr_path OutDir;
+	for (const xr_path& obj : CopiedObjects)
+	{
+		OutDir = ((Path == "..") ? CurrentDir / OutPath : OutPath) / obj.xfilename().c_str();
+
+		if (obj == OutDir || std::filesystem::exists(OutDir))
+		{
+			if (IsCutting)
+				continue;
+
+			CheckFileNameRecursive(OutDir, "Copy");
+		}
+
+		if (std::filesystem::is_directory(obj))
+		{
+			std::filesystem::copy(obj, OutDir, std::filesystem::copy_options::recursive);
+		}
+		else
+		{
+			std::filesystem::copy(obj, OutDir);
+
+			if (auto ThmFile = obj; ShouldTheFileHaveTHM(obj) &&
+				ThmFile.extension() != ".thm" && std::filesystem::exists(ThmFile.replace_extension(".thm")))
+			{
+				std::filesystem::copy(ThmFile, OutDir.replace_extension(".thm"));
+			}
+		}
+		if (IsCutting)
+			DeleteAction(obj);
+	}
+
+	if (IsCutting)
+		IsCutting = false;
+
+	CopiedObjects.clear();
+	//FS.rescan_path(OutDir.parent_path().string().c_str(), true);
+}
+
+void CContentView::DeleteAction(const xr_path& Path) /*const*/
+{
+	if (std::filesystem::is_directory(Path))
+	{
+		std::filesystem::remove_all(Path);
+	}
+	else
+	{
+		std::filesystem::remove(Path);
+
+		if (auto ThmFile = Path; ShouldTheFileHaveTHM(Path) && 
+			Path.extension() != ".thm" && std::filesystem::exists(ThmFile.replace_extension(".thm")))
+		{
+			std::filesystem::remove(ThmFile);
+		}
+	}
+
+	// For some reason, FS does not want to register that the file has been deleted. \
+				Temporarily removed the "const" and made the Rescan Directory();
+
+		//FS.rescan_path(Path.parent_path().string().c_str() , true);
+	RescanDirectory();
+}
+
+void CContentView::CopyAction(/*const xr_path& Path*/)
+{
+	CopiedObjects = SelectedObjects;
+	IsCutting = false;
+}
+
+void CContentView::CutAction(/*const xr_path& Path*/) 
+{
+	CopyAction();
+	IsCutting = true;
+}
+
+void CContentView::RenameAction(const xr_path& FilePath, const xr_string NewName)
+{
+	xr_path TempFileName = xr_path(FilePath).replace_filename(std::filesystem::path(std::tmpnam(nullptr)).stem());
+	xr_path NewFileName = FilePath;
+	NewFileName.replace_filename(NewName.c_str());
+	NewFileName.replace_extension(FilePath.extension());
+
+	std::filesystem::rename(FilePath, TempFileName);
+
+	if (std::filesystem::exists(NewFileName))
+	{
+		CheckFileNameRecursive(NewFileName, "Copy");
+	}
+
+	std::filesystem::rename(TempFileName, NewFileName);
+
+	if (!std::filesystem::is_directory(NewFileName) && ShouldTheFileHaveTHM(FilePath))
+	{
+		if (auto ThmFile = FilePath; ThmFile.extension() != ".thm" && std::filesystem::exists(ThmFile.replace_extension(".thm")))
+		{
+			std::filesystem::rename(ThmFile, NewFileName.replace_extension(".thm"));
+		}
+	}
+
+	//FS.rescan_path(NewFileName.parent_path().string().c_str(), true);
+
+}
+
+void CContentView::RenameActionActivate(const xr_path& Path)
+{
+	RenameObject.SetText = true;
+	RenameObject.Focus = false;
+	RenameObject.Active = true;
+	RenameObject.RenameBuf.clear();
+	RenameObject.Path = Path;
+}
+
+void CContentView::RenameActionEnd()
+{
+	RenameObject.Active = false;
+	RenameObject.RenameBuf.clear();
+	RenameObject.Path.clear();
+}
+
+bool CContentView::ShouldTheFileHaveTHM(const xr_path& file) const
+{
+	if (!file.has_extension())
+		return false;
+
+	if (auto e = file.extension();
+		e == ".group" || e == ".object" || e == ".dds" || e == ".tga")
+		return true;
+
+	return (false);
+}
+
+void CContentView::CreateAction() /*const*/
+{
+	xr_path OutDir = CurrentDir / xr_path("Folder");
+
+	if (std::filesystem::exists(OutDir))
+	{
+		CheckFileNameRecursive(OutDir, "New");
+	}
+
+	std::filesystem::create_directory(OutDir);
+
+	RenameActionActivate(OutDir);
+
+	// For some reason, FS does not want to register that the file has been deleted. \
+				Temporarily removed the "const" and made the Rescan Directory();
+	RescanDirectory();
+}
+#pragma endregion

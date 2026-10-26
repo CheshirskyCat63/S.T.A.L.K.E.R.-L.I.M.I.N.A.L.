@@ -1,0 +1,51 @@
+#pragma once
+#include "UIOptionsManager.h"
+
+class UI_API CUIOptionsItem
+{
+public:
+	enum ESystemDepends		{sdNothing, sdVidRestart, sdSndRestart, sdSystemRestart, sdApplyOnChange};
+
+public:
+							CUIOptionsItem		();
+	virtual					~CUIOptionsItem		();
+	virtual void			AssignProps			(const shared_str& entry, const shared_str& group);
+	void					SetSystemDepends	(ESystemDepends val) {m_dep = val;}
+
+	static CUIOptionsManager* GetOptionsManager	() {return &m_optionsManager;}
+	IC		const char*			GetEntry			() const { return m_entry.c_str(); }
+			xr_token*		GetOptToken			();
+
+	virtual	void			OnMessage			(const char* message);
+
+	virtual void			SetCurrentOptValue	()			 {};	// opt->current
+	virtual void			SaveBackUpOptValue	()			 {};	// current->backup
+	virtual void			SaveOptValue		()			= 0;	// current->opt
+	virtual void			UndoOptValue		()			= 0;	// backup->current
+	virtual bool			IsChangedOptValue	() const 	 { return false; };	// backup!=current
+			void			OnChangedOptValue	();
+			
+protected:
+			void			SendMessage2Group	(const char* group, const char* message);
+
+
+			// string
+			const char*			GetOptStringValue	() const;
+			void			SaveOptStringValue	(const char* val);
+			// integer
+			void			GetOptIntegerValue	(int& val, int& min, int& max);
+			void			SaveOptIntegerValue	(int val);
+			// float
+			void			GetOptFloatValue	(float& val, float& min, float& max);
+			void			SaveOptFloatValue	(float val);
+			// bool
+			bool			GetOptBoolValue		();
+			void			SaveOptBoolValue	(bool val);
+			// token
+			const char*			GetOptTokenValue	();
+
+	shared_str				m_entry;
+	ESystemDepends			m_dep;
+
+	static CUIOptionsManager m_optionsManager;
+};

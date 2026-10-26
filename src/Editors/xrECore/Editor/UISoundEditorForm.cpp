@@ -1,0 +1,353 @@
+//---------------------------------------------------------------------------
+#include "stdafx.h"
+#include "UISoundEditorForm.h"
+#include "SoundManager.h"
+#include "../../../xrSound/stdafx.h"
+#include "../../../xrSound/Sound.h"
+
+#include <ogg/ogg.h>
+#include <vorbis/vorbisfile.h>
+
+UISoundEditorForm *UISoundEditorForm::Form = nullptr;
+
+UISoundEditorForm::UISoundEditorForm()
+{
+    m_ItemProps = new UIPropertiesForm();
+    m_ItemList = new UIItemListForm();
+    m_ItemList->SetOnItemFocusedEvent({this, &UISoundEditorForm::OnItemsFocused});
+    modif_map.clear();
+    m_Flags.zero();
+    InitItemList();
+    if (!FS.can_write_to_alias(_sounds_))
+    {
+        Log("#!You don't have permisions to modify sounds.");
+        m_ItemProps->SetReadOnly(true);
+        m_Flags.set(flReadOnly, true);
+        bAutoPlay = true;
+    }
+}
+
+UISoundEditorForm::~UISoundEditorForm()
+{
+    xr_delete(m_ItemProps); xr_delete(m_ItemList);
+}
+
+void UISoundEditorForm::Draw()
+{
+    ImGui::BeginChild("Left", ImVec2(200, 400), true);
+    m_ItemList->Draw();
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("Right", ImVec2(300, 400));
+    m_ItemProps->Draw();
+    ImGui::EndChild();
+    ImGui::Separator();
+    if (ImGui::Button("Close"))
+    {
+        bOpen = false;
+        ImGui::CloseCurrentPopup();
+        HideLib();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Ok"))
+    {
+        m_Snd.destroy();
+        UpdateLib();
+        HideLib();
+    }
+}
+
+void UISoundEditorForm::Update()
+{
+    if (Form)
+    {
+        if (!Form->IsClosed())
+        {
+            if (ImGui::BeginPopupModal("Sound Editor", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+            {
+                Form->Draw();
+                ImGui::EndPopup();
+            }
+
+            ImGui::OpenPopup("Sound Editor");
+        }
+        else
+        {
+            xr_delete(Form);
+        }
+       
+    }
+}
+
+void UISoundEditorForm::Show(const xr_string fileKey = "")
+{
+    VERIFY(!Form);
+	Form = new UISoundEditorForm();
+
+    if (!fileKey.empty())
+        Form->m_ItemList->SelectItem(fileKey.c_str());
+}
+
+void UISoundEditorForm::HideLib()
+{
+    m_Snd.destroy();
+    bOpen = false;
+    ImGui::CloseCurrentPopup();
+}
+
+void UISoundEditorForm::RegisterModifiedTHM()
+{
+    if (m_ItemProps->IsModified()) {
+        for (THMIt t_it = m_THM_Current.begin(); t_it != m_THM_Current.end(); t_it++) {
+            //.            (*t_it)->Save	(0,0);
+            AppendModif((*t_it)->SrcName());
+        }
+    }
+}
+
+void UISoundEditorForm::OnModified()
+{
+}
+
+void UISoundEditorForm::UpdateLib()
+{
+    RegisterModifiedTHM();
+    SaveUsedTHM();
+    SndLib->CommitSoundLib(modif_map);
+}
+
+void UISoundEditorForm::AppendModif(const char* nm)
+{
+    FS_File 		dest;
+    string_path		fname;
+    FS.update_path(fname, _sounds_, EFS.ChangeFileExt(nm, ".wav").c_str());
+    bool bFind = FS.file_find(fname, dest); R_ASSERT(bFind);
+    modif_map.insert(dest);
+}
+
+void UISoundEditorForm::OnControlClick(ButtonValue* V, bool& bModif, bool& bSafe)
+{
+    switch (V->btn_num) {
+    case 0: m_Snd.play(nullptr, sm_2D); 	break;
+    case 1: m_Snd.stop();			break;
+    case 2: {
+        bAutoPlay = !bAutoPlay;
+        V->value[V->btn_num] = shared_str().printf("Auto (%s)", bAutoPlay ? "on" : "off");
+    }break;
+    }
+    bModif = false;
+}
+
+void UISoundEditorForm::OnControl2Click(ButtonValue* V, bool& bModif, bool& bSafe)
+{
+    switch (V->btn_num) {
+    case 0: {
+        bAutoPlay = !bAutoPlay;
+        V->value[V->btn_num] = bAutoPlay ? "on" : "off";
+    }break;
+    }
+    bModif = false;
+}
+
+void UISoundEditorForm::OnSyncCurrentClick(ButtonValue* V, bool& bModif, bool& bSafe)
+{
+    THMIt it = m_THM_Current.begin();
+    THMIt it_e = m_THM_Current.end();
+
+    for (; it != it_e; ++it)
+    {
+        ESoundThumbnail* pTHM = *it;
+
+        string_path             src_name, game_name;
+        FS.update_path(src_name, _sounds_, pTHM->SrcName());
+        xr_strconcat(src_name, src_name, ".wav");
+
+        FS.update_path(game_name, _game_sounds_, pTHM->SrcName());
+        xr_strconcat(game_name, game_name, ".ogg");
+
+        Msg("synchronizing [%s]", game_name);
+        SndLib->MakeGameSound(pTHM, src_name, game_name);
+    }
+    Msg("Done.");
+}
+
+void UISoundEditorForm::OnAttClick(ButtonValue* V, bool& bModif, bool& bSafe)
+{
+    bModif = true;
+    ESoundThumbnail* thm = m_THM_Current.back();
+    switch (V->btn_num) {
+    case 0: {
+        float dist = thm->MinDist() / (0.01f * psSoundRolloff);
+        thm->SetMaxDist(dist + 0.1f * dist);
+    }break;
+    case 1: {
+        float dist = psSoundRolloff * (thm->MaxDist() - (0.1f / 1.1f) * thm->MaxDist()) * 0.01f;
+        thm->SetMinDist(dist);
+    }break;
+    }
+}
+
+void UISoundEditorForm::InitItemList()
+{
+    FS_FileSet		sound_map;
+    SndLib->GetSounds(sound_map, true);
+
+    ListItemsVec items;
+
+    // fill items
+    FS_FileSetIt it = sound_map.begin();
+    FS_FileSetIt _E = sound_map.end();
+    for (; it != _E; it++)
+    {
+        if (it->size == 0)
+        {
+            continue;
+        }
+
+        LHelper().CreateItem(items, it->name.c_str(), 0);
+    }
+
+    m_ItemList->AssignItems(items/*, false, true*/);
+}
+
+float UISoundEditorForm::GetOGGDurationInSeconds(const char* filename)
+{
+    OggVorbis_File vf;
+    if (ov_fopen(filename, &vf) < 0)
+    {
+        Msg("! Error: not an Ogg Vorbis file: %s", filename);
+        return -1.0f;
+    }
+
+    // Длительность в секундах
+    double duration = ov_time_total(&vf, -1);
+
+    ov_clear(&vf);
+    return static_cast<float>(duration);
+}
+
+size_t UISoundEditorForm::GetFileSizeInBytes(const char* filename)
+{
+    time_t t = {};
+    return Platform::Stat(filename, t);
+}
+
+void UISoundEditorForm::OnItemsFocused(ListItem* item)
+{
+    PropItemVec props;
+
+    RegisterModifiedTHM();
+    m_Snd.destroy();
+    m_THM_Current.clear();
+
+    if (item != nullptr) 
+    {
+        ListItem* prop = item;
+        if (prop) 
+        {
+            ESoundThumbnail* thm = FindUsedTHM(prop->Key());
+            if (!thm) m_THM_Used.push_back(thm = new ESoundThumbnail(prop->Key()));
+            m_THM_Current.push_back(thm);
+            thm->FillProp(props);
+        }
+    }
+
+    ButtonValue* B = nullptr;
+    if (m_THM_Current.size() == 1)
+    {
+        ESoundThumbnail* thm = m_THM_Current.back();
+        PlaySound(thm->SrcName());
+
+        string_path OggFilename;
+        FS.update_path(OggFilename, _game_sounds_, EFS.ChangeFileExt(thm->SrcName(), ".ogg").c_str());
+
+        CanvasValue* C = nullptr;
+        C = PHelper().CreateCanvas(props, "Attenuation", "", 64);
+        C->tag = (size_t)this;
+        C->OnDrawCanvasEvent.bind(this, &UISoundEditorForm::OnAttenuationDraw);
+        //		C->OnTestEqual.bind			(this,&TfrmSoundLib::OnPointDataTestEqual);
+        B = PHelper().CreateButton(props, "Auto Att", "By Min,By Max", ButtonValue::flFirstOnly);
+        B->OnBtnClickEvent.bind(this, &UISoundEditorForm::OnAttClick);
+
+        // NOTE: not supported in new sound
+        float FileTime = GetOGGDurationInSeconds(OggFilename);
+        size_t TotalSize = GetFileSizeInBytes(OggFilename);
+
+        PHelper().CreateCaption(props, "File Length", shared_str().printf("%.2f Kb", float(TotalSize) / 1024.f));
+        PHelper().CreateCaption(props, "Total Time", shared_str().printf("%.2f sec", FileTime));
+
+        if (!m_Flags.is(flReadOnly))
+        {
+            B = PHelper().CreateButton(props, "Control", "Play,Stop", ButtonValue::flFirstOnly);
+            B->OnBtnClickEvent.bind(this, &UISoundEditorForm::OnControlClick);
+        }
+    }
+    if (!m_Flags.is(flReadOnly))
+    {
+        B = PHelper().CreateButton(props, "Auto Play", bAutoPlay ? "on" : "off", ButtonValue::flFirstOnly);
+        B->OnBtnClickEvent.bind(this, &UISoundEditorForm::OnControl2Click);
+    }
+
+    if (!m_Flags.is(flReadOnly) && m_THM_Current.size())
+    {
+        B = PHelper().CreateButton(props, "MANAGE", "SyncCurrent", ButtonValue::flFirstOnly);
+        B->OnBtnClickEvent.bind(this, &UISoundEditorForm::OnSyncCurrentClick);
+    }
+
+    m_ItemProps->AssignItems(props);
+}
+void UISoundEditorForm::PlaySound(const char* name)
+{
+    string_path fname;
+    FS.update_path(fname, _game_sounds_, EFS.ChangeFileExt(name, ".ogg").c_str());
+    FS_File F;
+    if (FS.file_find(fname, F))
+    {
+        xr_string FileName = name;
+        if (FileName.Contains(".ogg"))
+        {
+            FileName += ".ogg";
+        }
+
+        m_Snd.create(FileName.c_str(), st_Effect, sg_Undefined);
+        m_Snd.play(nullptr, sm_2D);
+        if (!bAutoPlay)		m_Snd.stop();
+    }
+}
+void UISoundEditorForm::OnAttenuationDraw(CanvasValue* sender)
+{
+#define WIETH 90
+#define HEIGHT 80.f
+    ESoundThumbnail* thm = m_THM_Current.back();
+    float d_cost = thm->MaxDist() / WIETH;
+    static float values[WIETH] = {};
+    for (int d = 1; d < WIETH+1; d++) {
+        float R = d * d_cost;
+        float b = thm->MinDist() / (psSoundRolloff * R);
+        //		float b = m_Brightness/(m_Attenuation0+m_Attenuation1*R+m_Attenuation2*R*R);
+        float bb =  (HEIGHT * b);
+        float y = floorf(bb); clamp(y, 0.f, HEIGHT);
+        values[d - 1] = y;
+    }
+    ImGui::PlotLines("##LinesSound", values, IM_ARRAYSIZE(values),0,nullptr,0, HEIGHT, ImVec2(0, HEIGHT), 4);
+}
+ESoundThumbnail* UISoundEditorForm::FindUsedTHM(const char* name)
+{
+    for (THMIt it = m_THM_Used.begin(); it != m_THM_Used.end(); it++)
+        if (0 == strcmp((*it)->SrcName(), name)) return *it;
+    return nullptr;
+}
+
+void UISoundEditorForm::SaveUsedTHM()
+{
+    int m_age = time(nullptr);
+    for (THMIt t_it = m_THM_Used.begin(); t_it != m_THM_Used.end(); t_it++)
+        (*t_it)->Save(m_age, nullptr);
+}
+
+void UISoundEditorForm::DestroyUsedTHM()
+{
+    for (THMIt it = m_THM_Used.begin(); it != m_THM_Used.end(); it++)
+        xr_delete(*it);
+    m_THM_Used.clear();
+}

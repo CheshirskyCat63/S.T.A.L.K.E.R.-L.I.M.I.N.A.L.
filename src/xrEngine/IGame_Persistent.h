@@ -1,0 +1,116 @@
+#pragma once
+#include "../xrServerEntities/gametype_chooser.h"
+#include "GameFont.h"
+#include "Environment.h"
+#include "IGame_ObjectPool.h"
+#include "Render.h"
+#include <luabind/class_info.hpp>
+
+class IRenderVisual;
+class IMainMenu;
+extern ENGINE_API bool g_dedicated_server;
+
+class ENGINE_API IGame_Persistent : 
+	public DLL_Pure,
+	public pureAppStart, 
+	public pureAppEnd,
+	public pureAppActivate, 
+	public pureAppDeactivate,
+	public pureFrame
+{
+public:
+	union params
+	{
+		struct
+		{
+			string256	m_game_or_spawn;
+			string256	m_game_type;
+			string256	m_alife;
+			string256	m_new_or_load;
+			EGameIDs	m_e_game_type;
+		};
+		string256		m_params[4];
+
+		params() { reset(); }
+
+		void reset()
+		{
+			for (int i = 0; i < 4; ++i)
+				xr_strcpy(m_params[i], "");
+		}
+
+		void parse_cmd_line(const char* cmd_line)
+		{
+			reset();
+			int n = std::min(4, _GetItemCount(cmd_line, '/'));
+			for (int i = 0; i < n; ++i)
+			{
+				_GetItem(cmd_line, i, m_params[i], '/');
+				_strlwr(m_params[i]);
+			}
+		}
+	};
+
+	struct ShaderParamsData
+	{
+		float HelmetCondition = 0;
+		bool ItemCfgHudGasMaskAvailable = true;
+		bool ItemCfgHudRainDropsAvailable = true;
+	};
+
+	params m_game_params;
+	ShaderParamsData ShaderParams;
+	luabind::functor<void> ixr_framework_onframe;
+public:
+	virtual void					PreStart			(const char* op);
+	virtual void					Start				(const char* op);
+	virtual void					Disconnect			();
+	IGame_ObjectPool				ObjectPool;
+	class CEnvironment*				pEnvironment;
+	CEnvironment&					Environment()	{return *pEnvironment;};
+	void							Prefetch			( );
+	IMainMenu*						m_pMainMenu;	
+
+	virtual	void					UpdatePlayDestroyParticles() {};
+	virtual	void					UpdateParticles		() {};
+	virtual	void					destroy_particles	(bool all_particles) {};
+
+	virtual bool					OnRenderPPUI_query	() { return false; };	// should return true if we want to have second function called
+	virtual void					OnRenderPPUI_main	() {};
+	virtual void					OnRenderPPUI_PP		() {};
+
+	virtual	void					OnAppStart			();
+	virtual void					OnAppEnd			();
+	virtual	void					OnAppActivate		();
+	virtual void					OnAppDeactivate		();
+	virtual void		_BCL		OnFrame				();
+	virtual void					OnFrameMT			();
+
+	// вызывается только когда изменяется тип игры
+	virtual	void					OnGameStart			(); 
+	virtual void					OnGameEnd			();
+
+	virtual void					UpdateGameType		() {};
+	virtual void					GetCurrentDof		(Fvector3& dof){dof.set(-1.4f, 0.0f, 250.f);};
+	virtual void					SetBaseDof			(const Fvector3& dof){};
+	virtual void					OnSectorChanged		(int sector){};
+	virtual void					OnAssetsChanged		();
+
+	virtual void					RegisterModel		(IRenderVisual* V) {}
+	virtual	float					MtlTransparent		(u32 mtl_idx) { return 1;}
+
+	IGame_Persistent				();
+	virtual ~IGame_Persistent		();
+
+	ICF		u32						GameType			() {return m_game_params.m_e_game_type;};
+	virtual void					Statistics			(CGameFont* F) {}
+	virtual	void					LoadTitle			(bool change_tip=false, shared_str map_name=""){}
+	virtual void					SetLoadStageTitle	(const char* /*ls_title*/) {}
+	virtual bool					CanBePaused			()		{ return true;}
+	virtual void					GetTextureParams	(shared_str tex, Frect& out_rect, shared_str& file_name) {}
+	virtual void					ChangeCursorPosition(Fvector2 value) {}
+};
+
+extern ENGINE_API IGame_Persistent* g_pGamePersistent;
+
+#include "IGame_Menu.h"

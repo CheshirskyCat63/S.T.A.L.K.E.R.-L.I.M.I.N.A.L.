@@ -1,0 +1,436 @@
+////////////////////////////////////////////////////////////////////////////
+//	Module 		: ai_trader.cpp
+//	Created 	: 13.05.2002
+//  Modified 	: 13.05.2002
+//	Author		: Jim
+//	Description : AI Behaviour for monster "Trader"
+////////////////////////////////////////////////////////////////////////////
+
+#include "StdAfx.h"
+#include "pch_script.h"
+#include "ai_trader.h"
+#include "../../trade.h"
+#include "../../script_entity_action.h"
+#include "../../script_game_object.h"
+#include "../../Inventory.h"
+#include "../../../xrServerEntities/xrServer_Objects_ALife_Monsters.h"
+#include "../../Artefact.h"
+#include "../../xrServer.h"
+#include "../../relation_registry.h"
+#include "../../../xrServerEntities/object_broker.h"
+#include "../../sound_player.h"
+#include "../../Level.h"
+#include "../../game_object_space.h"
+#include "trader_animation.h"
+#include "../../../xrServerEntities/clsid_game.h"
+#include "../../../xrScripts/script_callback_ex.h"
+
+CAI_Trader::CAI_Trader()
+{
+	AnimMan			= new CTraderAnimation(this);
+} 
+
+CAI_Trader::~CAI_Trader()
+{
+	xr_delete		(m_sound_player);
+	xr_delete		(AnimMan);
+}
+
+void CAI_Trader::Load(const char* section)
+{
+	//	setEnabled						(false);
+	inherited::Load					(section);
+
+	//fHealth							= pSettings->r_float	(section,"Health");
+	SetfHealth( pSettings->r_float	(section,"Health") );
+
+	float max_weight = pSettings->r_float	(section,"max_item_mass");
+	inventory().SetMaxWeight(max_weight*1000);
+	//	inventory().SetMaxRuck(1000000);
+	inventory().CalcTotalWeight();
+}
+
+void CAI_Trader::reinit	()
+{
+	CScriptEntity::reinit	();
+	CEntityAlive::reinit	();
+	CInventoryOwner::reinit	();
+	sound().reinit			();
+	animation().reinit		();
+
+	m_busy_now				= false;
+}
+
+void CAI_Trader::reload	(const char* section)
+{
+	CEntityAlive::reload	(section);
+	CInventoryOwner::reload	(section);
+	sound().reload			(section);
+}
+
+
+bool CAI_Trader::bfAssignSound(CScriptEntityAction *tpEntityAction)
+{
+	if (!CScriptEntity::bfAssignSound(tpEntityAction)) {
+		//m_cur_head_anim_type	= MonsterSpace::eHeadAnimNone;
+		return					(false);
+	}
+
+	//CScriptSoundAction	&l_tAction	= tpEntityAction->m_tSoundAction;
+	//m_cur_head_anim_type = l_tAction.m_tHeadAnimType;
+
+	return				(true);
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Look At Actor
+//////////////////////////////////////////////////////////////////////////
+void CAI_Trader::BoneCallback(CBoneInstance *B)
+{
+	CAI_Trader*	this_class = static_cast<CAI_Trader*>(B->callback_param());
+
+	this_class->LookAtActor(B);
+	R_ASSERT2( _valid( B->mTransform ), "CAI_Trader::BoneCallback" );
+}
+
+void CAI_Trader::LookAtActor(CBoneInstance *B)
+{
+	Fvector dir;
+	dir.sub(Level().CurrentEntity()->Position(),Position());
+
+	float yaw,pitch;
+	dir.getHP(yaw, pitch);
+
+	float h,p,b;
+	XFORM().getHPB(h,p,b);
+	float cur_yaw	= h;
+	float dy		= std::abs(angle_normalize_signed(yaw - cur_yaw));
+	clamp			(dy, 0.f, 1.f);
+
+	if (angle_normalize_signed(yaw - cur_yaw) > 0) dy *= -1.f;
+
+	Fmatrix M;
+	M.setHPB (0.f, -dy, 0.f);
+	B->mTransform.mulB_43(M);
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+bool CAI_Trader::net_Spawn(CSE_Abstract* DC)
+{
+	CSE_Abstract* e = (CSE_Abstract*)(DC);
+	CSE_ALifeTrader* l_tpTrader = e->cast_trader();
+	R_ASSERT(l_tpTrader);
+
+	//проспавнить PDA у InventoryOwner
+	if (!CInventoryOwner::net_Spawn(DC))
+	{
+		return false;
+	}
+
+	if (!inherited::net_Spawn(DC) || !CScriptEntity::net_Spawn(DC))
+	{
+		return false;
+	}
+
+	setVisible(true);
+	setEnabled(true);
+
+	set_money(l_tpTrader->m_dwMoney, false);
+
+	// Установка callback на кости
+	IKinematics* kin = PKinematics(Visual());
+	CBoneInstance* bone_head = &kin->LL_GetBoneInstance(kin->LL_BoneID("bip01_head"));
+	bone_head->set_callback(bctCustom, BoneCallback, this);
+
+	shedule.t_min = 100;
+	shedule.t_max = 2500; // This equaltiy is broken by Dima :-( // 30 * NET_Latency / 4;
+
+	SpatialComponent->type |= ESPATIAL_TYPE::AI;
+	SpatialComponent->type |= ESPATIAL_TYPE::AI_ALIVE;
+
+	return true;
+}
+
+void CAI_Trader::net_Export		(NET_Packet& P)
+{
+	R_ASSERT						(Local());
+
+	//	P.w_float						(inventory().TotalWeight());
+	//	P.w_u32							(m_dwMoney);
+}
+
+void CAI_Trader::net_Import		(NET_Packet& P)
+{
+	R_ASSERT						(Remote());
+
+	float							fDummy;
+	P.r_float						(fDummy);
+	set_money						( P.r_u32(), false );
+
+	setVisible						(true);
+	setEnabled						(true);
+}
+
+void CAI_Trader::OnEvent(NET_Packet& P, u16 type)
+{
+	inherited::OnEvent(P, type);
+	CInventoryOwner::OnEvent(P, type);
+
+	ALife::_OBJECT_ID id;
+	CObject* Obj;
+
+	switch (type)
+	{
+	case GE_TRADE_BUY:
+	case GE_OWNERSHIP_TAKE:
+	{
+		P >> id;
+		Obj = Level().Objects.net_Find(id);
+		if (inventory().CanTakeItem(Obj->cast_inventory_item()))
+		{
+			Obj->H_SetParent(this);
+			inventory().Take(Obj->cast_game_object(), false, false);
+		}
+		else
+		{
+			NET_Packet P_;
+			u_EventGen(P_, GE_OWNERSHIP_REJECT, ID());
+			P_ << Obj->ID();
+			u_EventSend(P_);
+		}
+		break;
+	}
+	case GE_TRADE_SELL:
+	case GE_OWNERSHIP_REJECT:
+	{
+		P >> id;
+		Obj = Level().Objects.net_Find(id);
+		bool just_before_destroy = !P.r_eof() && P.r_u8();
+		bool dont_create_shell = (type == GE_TRADE_SELL) || just_before_destroy;
+
+		Obj->SetTmpPreDestroy(just_before_destroy);
+		inventory().DropItem(Obj->cast_game_object(), just_before_destroy, dont_create_shell);
+	}break;
+	case GE_TRANSFER_AMMO:
+	{
+		break;
+	}
+	}
+}
+
+void CAI_Trader::feel_touch_new(CObject* O)
+{
+	if (!g_Alive())
+	{
+		return;
+	}
+
+	if (Remote())
+	{
+		return;
+	}
+
+	CInventoryItem* I = O != nullptr ? O->cast_inventory_item() : nullptr;
+
+	if (I != nullptr && I->useful_for_NPC())
+	{
+		Msg("Taking item %s!", *I->object().cName());
+		NET_Packet P;
+		u_EventGen(P, GE_OWNERSHIP_TAKE, ID());
+		P << I->object().ID();
+		u_EventSend(P);
+	}
+}
+
+void CAI_Trader::DropItemSendMessage(CObject *O)
+{
+	if (!O || !O->H_Parent() || (this != O->H_Parent()))
+		return;
+
+	Msg("Dropping item!");
+	// We doesn't have similar weapon - pick up it
+	NET_Packet				P;
+	u_EventGen				(P,GE_OWNERSHIP_REJECT,ID());
+	P << O->ID();
+	u_EventSend				(P);
+}
+
+void CAI_Trader::shedule_Update	(u32 dt)
+{
+	inherited::shedule_Update	(dt);
+	UpdateInventoryOwner(dt);
+
+	if (GetScriptControl()) ProcessScripts();
+	else Think();
+}
+
+void CAI_Trader::g_WeaponBones(u16& L, u16& R1, u16& R2)
+{
+	IKinematics* V = PKinematics(Visual());
+	R1 = V->LL_BoneID("bip01_r_hand");
+	R2 = V->LL_BoneID("bip01_r_finger2");
+	L = V->LL_BoneID("bip01_l_finger1");
+}
+
+void CAI_Trader::g_fireParams(const CHudItem* pHudItem, Fvector& P, Fvector& D)
+{
+	VERIFY(inventory().ActiveItem());
+
+	if (g_Alive() && inventory().ActiveItem())
+	{
+		Center(P);
+		D.setHP(0.0f, 0.0f);
+		D.normalize_safe();
+	}
+}
+
+void CAI_Trader::Think()
+{
+}
+
+void CAI_Trader::Die (CObject* who)
+{
+	inherited::Die (who);
+}
+
+void CAI_Trader::net_Destroy()
+{
+	inherited::net_Destroy		();
+	CScriptEntity::net_Destroy ();
+}
+
+void CAI_Trader::UpdateCL()
+{ 
+	inherited::UpdateCL		();
+	sound().update			(Device.fTimeDelta);
+
+
+	if (!GetScriptControl() && !bfScriptAnimation()) 
+		animation().update_frame();
+}
+
+bool CAI_Trader::UsedAI_Locations()
+{
+	return					(true);
+}
+
+void CAI_Trader::OnStartTrade()
+{
+	m_busy_now			= true;
+	callback(GameObject::eTradeStart)();
+}
+
+void CAI_Trader::OnStopTrade()
+{
+	m_busy_now			= false;
+	callback(GameObject::eTradeStop)();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+
+
+bool CAI_Trader::can_attach				(const CInventoryItem *inventory_item) const
+{
+	return				(false);
+}
+
+bool CAI_Trader::use_bolts				() const
+{
+	return				(false);
+}
+
+void CAI_Trader::spawn_supplies			()
+{
+	inherited::spawn_supplies		();
+	CInventoryOwner::spawn_supplies	();
+}
+
+
+void CAI_Trader::save (NET_Packet &output_packet)
+{
+	inherited::save(output_packet);
+	CInventoryOwner::save(output_packet);
+}
+void CAI_Trader::load (IReader &input_packet)		
+{
+	inherited::load(input_packet);
+	CInventoryOwner::load(input_packet);
+}
+
+void CAI_Trader::Serialize(ISaveObject& Object)
+{
+	BEGIN_CHUNK(Object,"CAI_Trader")
+	{
+		inherited::Serialize(Object);
+		CInventoryOwner::Serialize(Object);
+	}
+}
+
+
+//проверяет список артефактов в заказах
+u32 CAI_Trader::ArtefactPrice (CArtefact* pArtefact)
+{
+	return pArtefact->Cost();
+}
+
+//продажа артефакта, с последуещим изменением списка заказов (true - если артефакт был в списке)
+bool CAI_Trader::BuyArtefact (CArtefact* pArtefact)
+{
+	VERIFY(pArtefact);
+	return false;
+}
+
+ALife::ERelationType CAI_Trader::tfGetRelationType(const CEntityAlive* tpEntityAlive) const
+{
+	CEntityAlive* cast_entity_alive = const_cast<CEntityAlive*>(tpEntityAlive);
+	const CInventoryOwner* pOtherIO = cast_entity_alive != nullptr ? cast_entity_alive->cast_inventory_owner() : nullptr;
+
+	ALife::ERelationType relation = ALife::eRelationTypeDummy;
+
+	if (pOtherIO != nullptr && !(const_cast<CEntityAlive*>(tpEntityAlive)->cast_base_monster()))
+	{
+		relation = RELATION_REGISTRY().GetRelationType(static_cast<const CInventoryOwner*>(this), pOtherIO);
+	}
+
+	if (ALife::eRelationTypeDummy != relation)
+	{
+		return relation;
+	}
+	else
+	{
+		return inherited::tfGetRelationType(tpEntityAlive);
+	}
+}
+
+DLL_Pure *CAI_Trader::_construct	()
+{
+	m_sound_player				= new CSoundPlayer(this);
+	
+	CEntityAlive::_construct	(); 
+	CInventoryOwner::_construct	();
+	CScriptEntity::_construct	();
+
+	return						(this);
+}
+
+bool CAI_Trader::AllowItemToTrade 	(CInventoryItem const * item, const SInvItemPlace& place) const
+{
+	if (!g_Alive())
+		return					(true);
+
+	if (item->object().CLS_ID == CLSID_DEVICE_PDA)
+		return					(false);
+
+	return						(CInventoryOwner::AllowItemToTrade(item,place));
+}
+
+void CAI_Trader::dialog_sound_start(const char* phrase)
+{
+	animation().external_sound_start(phrase);
+}
+
+void CAI_Trader::dialog_sound_stop()
+{
+	animation().external_sound_stop();
+}

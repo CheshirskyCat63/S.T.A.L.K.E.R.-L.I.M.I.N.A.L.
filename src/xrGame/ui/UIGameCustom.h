@@ -1,0 +1,266 @@
+#pragma once
+#include "../xrScripts/script_export_space.h"
+#include "object_interfaces.h"
+#include "inventory_space.h"
+#include "gametype_chooser.h"
+#include "../xrUI/Widgets/UIDialogHolder.h"
+#include "../xrEngine/CustomHUD.h"
+#include "../xrEngine/IGame_UICustom.h"
+#include "script_game_object.h"
+
+// refs
+class CUI;
+class CTeamBaseZone;
+class game_cl_GameState;
+class CUIDialogWnd;
+class CUICaption;
+class CUIStatic;
+class CUIWindow;
+class CUIXml;
+class CUIActorMenuBase;
+class CUIActorMenu;
+class CUIPdaWnd;			
+struct KillMessageStruct;
+class CUIMainIngameWnd;
+class CUIMessagesWindow;
+class CUIInventoryWnd;
+class CUICarBodyWnd;
+class CUITradeWnd;
+class CUIRadialMenuWeapon;
+class CUIUpgradeWnd;
+
+struct SDrawStaticStruct :public IPureDestroyableObject
+{
+	SDrawStaticStruct	();
+	virtual	void	destroy			();
+	CUIStatic*		m_static;
+	float			m_endTime;
+	shared_str		m_name;
+	void			Draw();
+	void			Update();
+	CUIStatic*		wnd()		{return m_static;}
+	bool			IsActual()	const;
+	void			SetText		(const char*);
+};
+
+
+struct SGameTypeMaps
+{
+	shared_str				m_game_type_name;
+	EGameIDs				m_game_type_id;
+	struct SMapItm{
+		shared_str	map_name;
+		shared_str	map_ver;
+		bool operator ==(const SMapItm& other){return map_name==other.map_name && map_ver==other.map_ver;}
+	};
+	xr_vector<SMapItm>		m_map_names;
+};
+
+struct SGameWeathers
+{
+	shared_str				m_weather_name;
+	shared_str				m_start_time;
+};
+typedef xr_vector<SGameWeathers>					GAME_WEATHERS;
+typedef xr_vector<SGameWeathers>::iterator			GAME_WEATHERS_IT;
+typedef xr_vector<SGameWeathers>::const_iterator	GAME_WEATHERS_CIT;
+
+class CMapListHelper
+{
+	typedef xr_vector<SGameTypeMaps>	TSTORAGE;
+	typedef TSTORAGE::iterator			TSTORAGE_IT;
+	typedef TSTORAGE::iterator			TSTORAGE_CIT;
+	TSTORAGE							m_storage;
+	GAME_WEATHERS						m_weathers;
+	void						Load			();
+	void						LoadMapInfo		(const char* file_name, const xr_string& map_name, const char* map_ver="1.0");
+	SGameTypeMaps*				GetMapListInt	(const shared_str& game_type);
+public:
+	const SGameTypeMaps&		GetMapListFor	(const shared_str& game_type);
+	const SGameTypeMaps&		GetMapListFor	(const EGameIDs game_id);
+	const GAME_WEATHERS&		GetGameWeathers	();
+};
+
+extern CMapListHelper	gMapListHelper;
+
+class CUITalkWnd;
+class CInventoryOwner;
+class CInventoryBox;
+class CUIMessageBox;
+class CUISleepWnd;
+#include "../../xrUI/Widgets/UIDialogWnd.h"
+
+class CChangeLevelWnd :	public CUIDialogWnd
+{
+	CUIMessageBox* m_messageBox;
+	typedef CUIDialogWnd	inherited;
+	void					OnCancel();
+	void					OnOk();
+public:
+	GameGraph::_GRAPH_ID	m_game_vertex_id;
+	u32						m_level_vertex_id;
+	Fvector					m_position;
+	Fvector					m_angles;
+	Fvector					m_position_cancel;
+	Fvector					m_angles_cancel;
+	bool					m_b_position_cancel;
+	bool					m_b_allow_change_level;
+	shared_str				m_message_str;
+
+	CChangeLevelWnd();
+	virtual				~CChangeLevelWnd() {};
+	virtual void		SendMessage(CUIWindow* pWnd, s16 msg, void* pData);
+	virtual bool		WorkInPause()const { return true; }
+	virtual void		Show(bool status);
+	virtual bool		OnKeyboardAction(int dik, EUIMessages keyboard_action);
+	virtual bool		OnGamepadKeyAction(int id, EUIMessages gamepad_action);
+
+	virtual CUIWindow* ui_cast_window() { return this; }
+};
+
+class CUIGameCustom :
+	public IGame_CustomUI, 
+	public DLL_Pure, 
+	public CDialogHolder
+{
+private:
+	xrCriticalSection ui_lock;
+protected:
+	CUIWindow*			m_window;
+	CUICaption*			GameCaptions			() {return m_pgameCaptions;}
+	CUICaption*			m_pgameCaptions;
+	CUIXml*				m_msgs_xml;
+	typedef xr_vector<SDrawStaticStruct*>	st_vec;
+	typedef st_vec::iterator				st_vec_it;
+	st_vec									m_custom_statics;
+
+	CUIActorMenu*		m_ActorMenu;
+	CUIInventoryWnd*	m_InventoryMenu;
+	CUICarBodyWnd*		m_CarBodyMenu;
+	CUITradeWnd*		m_TradeMenu;
+	CUIUpgradeWnd*		m_UpgradeMenu;
+	CUIPdaWnd*			m_PdaMenu;
+	CUIRadialMenuWeapon* m_RadialMenuWeapon;
+
+	bool				m_bShowGameIndicators;
+public:
+	CUIMainIngameWnd*	UIMainIngameWnd;
+	CUIMessagesWindow*	m_pMessagesWnd;
+	CUITalkWnd*			TalkMenu;
+
+	virtual void		SetClGame				(game_cl_GameState* g);
+	virtual void		OnInventoryAction		(PIItem item, u16 action_type);
+
+	
+						CUIGameCustom			();
+	virtual				~CUIGameCustom			();
+
+	bool				HasShownDialogs			();
+
+	virtual	void		Init					(int stage)	{};
+	
+	virtual void		Render					();
+	virtual void _BCL	OnFrame					();
+	
+	IC CUIActorMenu*	ActorMenu				() const { return m_ActorMenu; }
+	IC CUIInventoryWnd*	InventoryWnd			() const { return m_InventoryMenu; }
+	IC CUICarBodyWnd*	CarBodyWnd				() const { return m_CarBodyMenu; }
+	IC CUITradeWnd*		TradeWnd				() const { return m_TradeMenu; }
+	IC CUIPdaWnd*		PdaMenu					() const { return m_PdaMenu;   }
+	IC CUIRadialMenuWeapon*	RadialMenuWeapon	() const { return m_RadialMenuWeapon;   }
+
+	CUIActorMenuBase*	GetInventoryMenu		();
+	CUIActorMenuBase*	GetCarbodyMenu			();
+	CUIActorMenuBase*	GetTradeMenu			();
+	CUIActorMenuBase*	GetActiveInventoryWindow();
+
+			bool		ShowActorMenu			();
+			void		HideActorMenu			();
+			void		UpdateActorMenu			(); //Alundaio
+			CScriptGameObject* CurrentItemAtCell(); //Alundaio
+			bool		ShowPdaMenu				();
+			void		HidePdaMenu				();
+			void		ShowMessagesWindow		();
+			void		HideMessagesWindow		();
+			bool		ShowRadialMenuWeapon	();
+			void		HideRadialMenuWeapon	();
+
+	virtual void		ShowGameIndicators		(bool b) override {m_bShowGameIndicators	= b;};
+	virtual bool		GameIndicatorsShown		() const override {return m_bShowGameIndicators;};
+	virtual CDialogHolder* GetDialogHolder		() { return this; };
+	void				ShowCrosshair			(bool b)			{psHUD_Flags.set			(HUD_CROSSHAIR_RT, b);}
+	bool				CrosshairShown			()					{return !!psHUD_Flags.test	(HUD_CROSSHAIR_RT);}
+
+	
+	void				StartTalk				(bool disable_break);
+	void				StartTrade				(CInventoryOwner* pActorInv, CInventoryOwner* pOtherOwner);
+	void				StartUpgrade			(CInventoryOwner* pActorInv, CInventoryOwner* pMech);
+	bool				StartCarBody			(CInventoryOwner* pActorInv, CInventoryOwner* pOtherOwner);
+	bool				StartCarBody			(CInventoryOwner* pActorInv, CInventoryBox* pBox);
+
+	virtual void		HideShownDialogs		();
+
+			void		AddCustomMessage		(const char* id, float x, float y, float font_size, CGameFont *pFont, u16 alignment, u32 color);
+			void		AddCustomMessage		(const char* id, float x, float y, float font_size, CGameFont *pFont, u16 alignment, u32 color/*, const char* def_text*/, float flicker );
+			void		CustomMessageOut		(const char* id, const char* msg, u32 color);
+			void		RemoveCustomMessage		(const char* id);
+
+	SDrawStaticStruct*	AddCustomStatic			(const char* id, bool bSingleInstance, float ttlDefault = -1.0f);
+	SDrawStaticStruct*	AddHudMessage			(const char* text, const char* text2 = nullptr, const char* id = nullptr, bool trnslate_second_text = false, float time = 3.f, bool bSingleInstance = true);
+	SDrawStaticStruct*	GetCustomStatic			(const char* id);
+	void				RemoveCustomStatic		(const char* id);
+
+	void				CommonMessageOut		(const char* text);
+
+	virtual void		ChangeTotalMoneyIndicator(const char* newMoneyString)		{};
+	virtual void		DisplayMoneyChange		(const char* deltaMoney)			{};
+	virtual void		DisplayMoneyBonus		(KillMessageStruct* bonus)	{};
+	
+	virtual void		UnLoad					();
+	void				Load					();
+	
+	void				OnConnected				();
+
+	void				UpdatePda				();
+	void				update_fake_indicators	(u8 type, float power);
+	void				enable_fake_indicators	(bool enable);
+	virtual void		ReloadGamepadLegends	();
+
+
+	// Change Level
+public:
+	CChangeLevelWnd* UIChangeLevelWnd;
+	CUISleepWnd* SleepWnd = nullptr;
+	void				ChangeLevel	(GameGraph::_GRAPH_ID game_vert_id, u32 level_vert_id, Fvector pos, Fvector ang, Fvector pos2, Fvector ang2, bool b, const shared_str& message, bool b_allow_change_level);
+	void				ShowSleepDialog();
+	void				ShowSleepDialogAtHour(int hours);
+	void				SetSleepHourPresets(xr_vector<int> hours);
+	void				ClearSleepHourPresets();
+
+	bool				IsSleepDialogReady() const;
+	bool				IsSleepDialogShown() const;
+	void				HideSleepDialog();
+	void				CancelSleepDialog();
+	bool				ConfirmSleep();
+	void				ForceSleep(int hours);
+	bool				AbortSleep();
+	int					GetSleepSelectedHours() const;
+	void				SetSleepSelectedHours(int hours);
+	bool				IsActorSleeping() const;
+	u8					GetSleepPhase() const;
+
+	void				SetSleepHoursRange(int minHours, int maxHours);
+	void				ClearSleepHoursRange();
+	void				SetSleepAllowBleeding(bool allow);
+	void				ClearSleepAllowBleeding();
+	void				SetSleepRestorePower(float power);
+	void				ClearSleepRestorePower();
+	void				SetSleepMute(bool muteMusic, bool muteEffects);
+	void				ClearSleepMute();
+	void				ClearSleepSessionOverrides();
+	void				SetSleepBlocked(bool blocked, LPCSTR warningText = nullptr);
+
+
+	DECLARE_SCRIPT_REGISTER_FUNCTION
+}; // class CUIGameCustom
+extern CUIGameCustom*		CurrentGameUI();

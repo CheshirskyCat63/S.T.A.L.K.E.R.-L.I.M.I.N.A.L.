@@ -1,0 +1,43 @@
+#include "stdafx.h"
+
+void CRenderTarget::phase_cas()
+{
+    u_setrt(rt_Back_Buffer_AA, nullptr, nullptr, nullptr);
+    GRHI->StateManager->SetCullMode(ERHI_CULLMODE::NONE);
+    RCache.set_Stencil(false);
+
+	// Draw COLOR
+	RCache.set_Element(ps_r4_sharpening_mode == 0 ? s_cas->E[1] : s_cas->E[0]);
+	RCache.set_c("sharpening_intensity", ps_r4_cas_sharpening);
+	RCache.set_Geometry(FSTriangleGeom);
+	RCache.Render(ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_LIST, 0, 0, 3, 0, 1);
+
+	//Resolve back to rt_Back_Buffer
+	GRHI->CopySurface(rt_Back_Buffer->pSurface, rt_Back_Buffer_AA->pSurface);
+}
+
+void CRenderTarget::phase_ui_postprocess(Fcolor* color, bool HasBackground)
+{
+	RCache.set_Element(s_cas->E[3]);
+	RCache.set_Geometry(FSTriangleGeom);
+	RCache.set_c("ui_has_background", HasBackground ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+
+	if(color)
+	{
+		RCache.set_c("static_color", color->r, color->g, color->b, color->a);
+	}
+	else
+	{
+		RCache.set_c("static_color", 1, 1, 1, 1);
+	}
+
+	RCache.Render(ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_LIST, 0, 0, 3, 0, 1);
+}
+
+
+void CRenderTarget::phase_ui_postprocess_copy()
+{
+	RCache.set_Element(s_cas->E[2]);
+	RCache.set_Geometry(FSTriangleGeom);
+	RCache.Render(ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_LIST, 0, 0, 3, 0, 1);
+}

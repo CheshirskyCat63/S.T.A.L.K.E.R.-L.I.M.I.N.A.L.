@@ -1,0 +1,202 @@
+#pragma once
+#include "../../xrUI/Widgets/UIWindow.h"
+#include "../../xrUI/Widgets/UIWndCallback.h"
+#include "../../xrCore/Containers/associative_vector.h"
+#include "../GameTaskDefs.h"
+#include "../GameTask.h"
+#include "../../xrUI/Widgets/UICheckButton.h"
+#include "PdaConstants.h"
+#include "UISecondTaskWnd.h"
+class CPdaUiSounds;
+class CUIMapWnd;
+class CUIStatic;
+class CUIXml;
+class CUITaskItem;
+class CUI3tButton;
+class CUIFrameLineWnd;
+class CUIFrameWindow;
+class CUICheckButton;
+class UIMapLegend;
+class UIHint;
+class CUIGamepadLegend;
+
+class CUITaskWnd final		:	public CUIWindow, 
+								public CUIWndCallback
+{
+private:
+	typedef CUIWindow		inherited;
+
+	CUIFrameWindow*			m_background;
+	CUIFrameLineWnd*		m_background2;
+
+	CUIStatic*				m_center_background;
+	CUIStatic*				m_right_bottom_background;
+	CUIFrameLineWnd*		m_task_split;
+
+	CUITaskItem*			m_pStoryLineTaskItem;
+	CUITaskItem*			m_pSecondaryTaskItem;
+
+	CUI3tButton*			m_BtnTaskListWnd;
+	STaskWndFeatures		m_features;
+	CUIStatic*				m_second_task_index;
+	CUIStatic*				m_devider;
+	u32						m_actual_frame;
+
+	CUI3tButton*			m_btn_focus;
+	CUI3tButton*			m_btn_focus2;
+
+	enum MAP_MARKS_FILTER
+	{
+		MAP_MARKS_FILTER_TREASURES = 0,
+		MAP_MARKS_FILTER_PRIMARY_OBJECTS,
+		MAP_MARKS_FILTER_SECONDARY_TASKS,
+		MAP_MARKS_FILTER_NPCS,
+		MAP_MARKS_FILTER_PERSONAL_SPOTS,
+
+		MAP_MARKS_FILTER_MAX
+	};
+
+	enum class ETaskScopeMode : u8
+	{
+		Story = 0,
+		Side,
+		Failed
+	};
+	
+	CUICheckButton*			m_cbFilters[MAP_MARKS_FILTER_MAX];
+	int						m_currentFilterIndex = 0;
+	bool					m_bTreasuresEnabled;
+	bool					m_bQuestNpcsEnabled;
+	bool					m_bSecondaryTasksEnabled;
+	bool					m_bPrimaryObjectsEnabled;
+	bool					m_bPersonalSpotsEnabled;
+
+	ETaskScopeMode			m_taskScopeMode = ETaskScopeMode::Story;
+	CUI3tButton*			m_btnScopeStory = nullptr;
+	CUI3tButton*			m_btnScopeSide = nullptr;
+	CUI3tButton*			m_btnScopeFailed = nullptr;
+
+	UITaskListWnd*			m_task_wnd;
+	bool					m_task_wnd_show;
+	UIMapLegend*			m_map_legend_wnd;
+
+public:
+	UIHint*					hint_wnd;
+	CUIMapWnd*				m_pMapWnd;
+	CUIGamepadLegend*		m_gamepad_legend = nullptr;
+
+public:
+								CUITaskWnd				();
+	virtual						~CUITaskWnd				();
+	virtual void				SendMessage				(CUIWindow* pWnd, s16 msg, void* pData);
+			void				Init					();
+	virtual void				Update					();
+	virtual void				Draw					();
+			void				DrawHint				();
+	virtual void				Show					(bool status);
+	virtual void				Reset					();
+	virtual bool				OnMouseAction			(float x, float y, EUIMessages mouse_action);
+	virtual bool				OnGamepadKeyAction		(int id, EUIMessages gamepad_action);
+	virtual bool				OnGamepadKeyHold		(int id);
+
+			void				ReloadTaskInfo			();
+			void				ShowMapLegend			(bool status);
+			void				Switch_ShowMapLegend	();
+
+			bool IsTreasuresEnabled() const { return m_bTreasuresEnabled; };
+			bool IsQuestNpcsEnabled() const { return m_bQuestNpcsEnabled; };
+			bool IsSecondaryTasksEnabled() const { return m_bSecondaryTasksEnabled; };
+			bool IsPrimaryObjectsEnabled() const { return m_bPrimaryObjectsEnabled; };
+			void TreasuresEnabled(bool enable)
+			{
+				m_bTreasuresEnabled = enable;
+				if (m_cbFilters[MAP_MARKS_FILTER_TREASURES])
+					m_cbFilters[MAP_MARKS_FILTER_TREASURES]->SetCheck(enable);
+			};
+			void QuestNpcsEnabled(bool enable)
+			{
+				m_bQuestNpcsEnabled = enable;
+				if (m_cbFilters[MAP_MARKS_FILTER_NPCS])
+					m_cbFilters[MAP_MARKS_FILTER_NPCS]->SetCheck(enable);
+			};
+			void SecondaryTasksEnabled(bool enable);
+			void ApplySecondaryTasksMapFilter(bool enable);
+			void PrimaryObjectsEnabled(bool enable)
+			{
+				m_bPrimaryObjectsEnabled = enable;
+				if (m_cbFilters[MAP_MARKS_FILTER_PRIMARY_OBJECTS])
+					m_cbFilters[MAP_MARKS_FILTER_PRIMARY_OBJECTS]->SetCheck(enable);
+			};
+
+			void				Show_TaskListWnd		(bool status);
+			void				SetUiSounds				(CPdaUiSounds* uiSounds) { m_pUiSounds = uiSounds; }
+			void				FocusPrimaryTaskOnMap	();
+
+			virtual CUIWindow* ui_cast_window() { return this; }
+
+protected:
+	CPdaUiSounds*				m_pUiSounds = nullptr;
+	// Controller
+	bool						SwitchToNextFilter		(bool loop);
+	bool						SwitchToPrevFilter		(bool loop);
+	void						UpdateFilterHighlight	();
+	void						UpdateGamepadLegend		();
+private:
+	void						TaskSetTargetMap		(CGameTask* task);
+	void						TaskShowMapSpot			(CGameTask* task, bool show);
+
+	void						OnNextTaskClicked		();
+	void 						OnPrevTaskClicked		();
+	void 				OnShowTaskListWnd		(CUIWindow* w, void* d);
+	void 				OnTask1DbClicked		(CUIWindow*, void*);
+	void				OnTask2DbClicked		(CUIWindow*, void*);
+
+	void 				OnShowTreasures			(CUIWindow*, void*);
+	void 				OnShowPrimaryObjects	(CUIWindow*, void*);
+	void 				OnShowSecondaryTasks	(CUIWindow*, void*);
+	void 				OnShowQuestNpcs			(CUIWindow*, void*);
+	void 				OnShowPersonalSpots		(CUIWindow*, void*);
+
+	void				OnTaskScopeStory		(CUIWindow*, void*);
+	void				OnTaskScopeSide			(CUIWindow*, void*);
+	void				OnTaskScopeFailed		(CUIWindow*, void*);
+
+	void				ResolveTaskRows			(CGameTask*& outPrimary, CGameTask*& outSecondary) const;
+	void				InitStorylineWidgets		(CUIXml& xml);
+	void				InitStorylineFocusButton	(CUIXml& xml);
+	CUITaskItem*		StorylineHintItem			() const;
+	void				OnTaskListFilterChanged		(ETaskListFilter mode);
+	bool				CanUseTaskMapSpot			(CGameTask* task, bool forShow) const;
+};
+
+class CUITaskItem final : public CUIWindow
+{
+private:
+	typedef CUIWindow			inherited;
+
+	associative_vector<shared_str, CUIStatic*>			m_info;
+	CGameTask*											m_owner;
+public:
+								CUITaskItem				();
+	virtual						~CUITaskItem			() = default;
+
+	virtual void 				OnFocusReceive			();
+	virtual void	 			OnFocusLost				();
+	virtual void				Update					();
+	virtual void				OnMouseScroll			(float iDirection);
+	virtual bool				OnMouseAction					(float x, float y, EUIMessages mouse_action);
+	virtual void				SendMessage				(CUIWindow* pWnd, s16 msg, void* pData);
+
+	void						Init					(CUIXml& uiXml, const char* path);
+	void						InitTask				(CGameTask* task);
+	CGameTask*					OwnerTask				()							{return m_owner;}
+
+	virtual CUIWindow* ui_cast_window() { return this; }
+
+public:
+	bool						show_hint_can;
+	bool						show_hint;
+
+protected:
+	u32							m_hint_wt;
+};

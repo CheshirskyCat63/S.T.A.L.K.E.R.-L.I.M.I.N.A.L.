@@ -1,0 +1,130 @@
+////////////////////////////////////////////////////////////////////////////
+//	Module 		: UIFactionWarWnd.h
+//	Created 	: 26.12.2007
+//	Author		: Evgeniy Sokolov
+//	Description : UI Faction War window class
+////////////////////////////////////////////////////////////////////////////
+
+#pragma once
+
+#include "../../xrUI/Widgets/UIWindow.h"
+#include "../../xrUI/Widgets/UIWndCallback.h"
+#include "FactionState.h"
+#include "UIWarState.h"
+
+class CUIStatic;
+class CGameTask;
+class CUIXml;
+class CUIProgressBar;
+class CUIFrameLineWnd;
+class CUIGamepadLegend;
+
+class CUIFactionWarWnd final : public CUIWindow, public CUIWndCallback
+{
+private:
+	typedef CUIWindow	inherited;
+
+	bool m_initialized;
+
+	CUIFrameWindow*		m_background;
+	CUIFrameWindow*		m_center_background;
+
+	CUIFrameLineWnd*	m_background2;
+	CUIStatic*			m_center_background2;
+
+	CUIStatic*			m_target_static;
+	CUIStatic*			m_target_caption;       // our
+	Fvector2			m_tc_pos;
+	CUIStatic*			m_target_desc;
+	Fvector2			m_td_pos;
+	CUIStatic*			m_state_static;
+
+	CUIFrameLineWnd*	m_static_line1;
+	CUIFrameLineWnd*	m_static_line2;
+	CUIFrameLineWnd*	m_static_line3;
+	CUIFrameLineWnd*	m_static_line4;
+	CUIFrameLineWnd*	m_static_line_left;
+	CUIFrameLineWnd*	m_static_line_right;
+
+	CUIStatic*			m_our_icon;
+	CUIStatic*			m_our_icon_over;
+	CUIStatic*			m_our_name;
+	CUIStatic*			m_st_our_frac_info;
+	CUIStatic*			m_st_our_mem_count;
+	CUIStatic*			m_st_our_resource;
+	
+	CUIProgressBar*		m_pb_our_state;
+	CUIProgressBar*		m_pb_our_mem_count;
+	CUIProgressBar*		m_pb_our_resource;
+
+	CUIStatic*			m_enemy_icon;
+	CUIStatic*			m_enemy_icon_over;
+	CUIStatic*			m_enemy_name;
+	CUIStatic*			m_st_enemy_frac_info;
+	CUIStatic*			m_st_enemy_mem_count;
+	CUIStatic*			m_st_enemy_resource;
+
+	CUIProgressBar*		m_pb_enemy_state;
+	CUIProgressBar*		m_pb_enemy_mem_count;
+	CUIProgressBar*		m_pb_enemy_resource;
+
+	CUIWindow*			m_war_states_parent;
+	float				m_war_states_dx;
+	float				m_war_states_xcenter;
+	enum				{ max_war_state = FactionState::war_state_count };
+	FixedVector<UIWarState*, max_war_state> m_war_state;
+
+	enum				{ max_bonuce = 6 };
+	CUIStatic*			m_our_bonuces[max_bonuce];
+	CUIStatic*			m_enemy_bonuces[max_bonuce];
+	
+	u8					m_current_window = 0;
+	u8					m_factions_count = 0;
+
+	// ----------------------------------------
+	u32					m_update_delay;
+	u32					m_previous_time;
+
+	FactionState		m_our_faction;
+	FactionState		m_enemy_faction;
+
+	int					m_max_member_count;
+	float				m_max_resource;
+	float				m_max_power;
+
+public:
+						CUIFactionWarWnd		();
+	virtual				~CUIFactionWarWnd		();
+
+	virtual void		SendMessage				( CUIWindow* pWnd, s16 msg, void* pData );
+	virtual void 		Show					( bool status );
+	virtual void		Update					();
+
+			void		ShowInfo				( bool status );
+
+			void		Reset					();
+			void		Init					();
+			
+			bool		InitFactions			();
+			void		UpdateInfo				();
+			void		UpdateWarStates			( FactionState const& faction );
+			void		set_amount_our_bonus	( int value );
+			void		set_amount_enemy_bonus	( int value );
+
+	virtual bool 		OnGamepadKeyAction		(int id, EUIMessages gamepad_action);
+	virtual bool		OnGamepadKeyHold		(int key);
+
+			UIHint*		hint_wnd;
+	CUIGamepadLegend*	m_gamepad_legend = nullptr;
+
+	virtual CUIWindow* ui_cast_window() { return this; }
+
+protected:
+			int			get_max_member_count	();
+			float		get_max_resource		();
+			float		get_max_power			();
+
+			void		TurnLeft				(bool loop = false);
+			void		TurnRight				(bool loop = false);
+}; // class CUIFactionWarWnd
+

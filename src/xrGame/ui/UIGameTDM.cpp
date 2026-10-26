@@ -1,0 +1,196 @@
+#include "StdAfx.h"
+#include "UIGameTDM.h"
+
+#include "game_cl_base.h"
+
+#include "game_cl_teamdeathmatch.h"
+
+#include "ui/TeamInfo.h"
+
+#include "object_broker.h"
+#include "../../xrUI/UIHelper.h"
+#include "UITeamPanels.h"
+#include "ui/UIMoneyIndicator.h"
+#include "ui/UIRankIndicator.h"
+#include "../../xrUI/Widgets/UIMultiTextStatic.h"
+#include "../../xrUI/UIFontDefines.h"
+
+#define MSGS_OFFS 510
+#define TEAM_PANELS_TDM_XML_NAME "ui_team_panels_tdm.xml"
+
+#define BUY_MSG_COLOR		0xffffff00
+#define SCORE_MSG_COLOR		0xffffffff
+#define REINFORCEMENT_MSG_COLOR		0xff8080ff
+#define TODO_MSG_COLOR		0xff00ff00
+
+#define DI2PX(x) float(iFloor((x+1)*float(UI_BASE_WIDTH)*0.5f))
+#define DI2PY(y) float(iFloor((y+1)*float(UI_BASE_HEIGHT)*0.5f))
+#define SZ(x) x*UI_BASE_WIDTH
+
+//--------------------------------------------------------------------
+CUIGameTDM::CUIGameTDM()
+:m_game(nullptr)
+{
+	m_buy_msg_caption = nullptr;
+}
+
+void CUIGameTDM::SetClGame (game_cl_GameState* g)
+{
+	inherited::SetClGame(g);
+	m_game = g->cast_game_cl_teamdeathmatch();
+	R_ASSERT(m_game);
+}
+
+void CUIGameTDM::Init (int stage)
+{
+	if(stage==0)
+	{ //shared
+		m_pUITeamSelectWnd				= new CUISpawnWnd	();
+		m_team1_icon					= new CUIStatic();
+		m_team2_icon					= new CUIStatic();
+		m_team1_score					= new CUIStatic();
+		m_team1_score->SetAutoDelete	(true);
+		m_team2_score					= new CUIStatic();
+		m_team2_score->SetAutoDelete	(true);
+
+		inherited::Init					(stage);
+
+		if (m_msgs_xml->NavigateToNode("mp_tdm_buy"))
+			m_buy_msg_caption				= UIHelper::CreateStatic(*m_msgs_xml, "mp_tdm_buy", m_window);
+		else
+		{
+			GameCaptions()->addCustomMessage(m_buy_msg_caption_legacy, DI2PX(0.0f), DI2PY(0.9f), SZ(0.02f), UI().Font().GetFont(GRAFFITI19_FONT_NAME), CGameFont::alCenter, BUY_MSG_COLOR, "");
+		}
+	}
+	if(stage==1)
+	{ //unique
+		CUIXml							uiXml, xml2, xml_test;
+		if (xml_test.Load(CONFIG_PATH, UI_PATH, TEAM_PANELS_TDM_XML_NAME))
+		{
+			m_pTeamPanels = new UITeamPanels();
+			m_pTeamPanels->Init(TEAM_PANELS_TDM_XML_NAME, "team_panels_wnd");
+		}
+		uiXml.Load						(CONFIG_PATH, UI_PATH, "ui_game_tdm.xml");
+
+		if (uiXml.NavigateToNode("global"))
+			CUIXmlInit::InitWindow			(uiXml, "global",		0,  m_window);
+		else
+		{
+			m_window->SetWndPos(Fvector2().set(0, 0));
+			m_window->SetWndSize(Fvector2().set(UI_BASE_WIDTH, UI_BASE_HEIGHT));
+		}
+		CUIXmlInit::InitStatic			(uiXml, "team1_icon",	0,	m_team1_icon);
+		CUIXmlInit::InitStatic			(uiXml, "team2_icon",	0,	m_team2_icon);
+		CUIXmlInit::InitStatic			(uiXml, "team1_score",	0,	m_team1_score);
+		CUIXmlInit::InitStatic			(uiXml, "team2_score",	0,	m_team2_score);
+		CUIXmlInit::InitStatic			(uiXml, "fraglimit",	0,	m_pFragLimitIndicator);
+
+		m_pMoneyIndicator->InitFromXML	(uiXml);
+		m_pRankIndicator->InitFromXml	(uiXml);
+	}
+	if(stage==2)
+	{ //after
+		inherited::Init(stage);
+		m_window->AttachChild			(m_team1_score);
+		m_window->AttachChild			(m_team2_score);
+	}
+}
+
+void CUIGameTDM::UnLoad()
+{
+	inherited::UnLoad	();
+	xr_delete			(m_team1_icon);
+	xr_delete			(m_team2_icon);
+	delete_data			(m_pUITeamSelectWnd);
+}
+
+CUIGameTDM::~CUIGameTDM()
+{
+}
+
+bool CUIGameTDM::IR_UIOnKeyboardPress(int dik)
+{
+	switch (dik) {
+		case SDL_SCANCODE_CAPSLOCK:
+		{
+			if (m_game)
+			{
+				if (m_game->Get_ShowPlayerNamesEnabled())
+					m_game->Set_ShowPlayerNames( !m_game->Get_ShowPlayerNames() );
+				else
+					m_game->Set_ShowPlayerNames(true);
+				return true;
+			};
+		}break;
+	}
+	return inherited::IR_UIOnKeyboardPress(dik);
+}
+
+bool CUIGameTDM::IR_UIOnKeyboardRelease(int dik)
+{
+	switch (dik) {
+		case SDL_SCANCODE_CAPSLOCK:
+			{
+				if (m_game)
+				{
+					if (!m_game->Get_ShowPlayerNamesEnabled())						
+						m_game->Set_ShowPlayerNames(false);
+					return true;
+				};
+			}break;
+	}
+
+	return inherited::IR_UIOnKeyboardRelease(dik);
+}
+
+void CUIGameTDM::OnFrame()
+{
+	inherited::OnFrame();
+	m_team1_icon->Update();
+	m_team2_icon->Update();
+}
+
+void CUIGameTDM::Render()
+{
+	m_team1_icon->Draw();
+	m_team2_icon->Draw();
+	inherited::Render();
+}
+
+void CUIGameTDM::SetScoreCaption(int t1, int t2)
+{
+	string32				str;
+	xr_sprintf					(str,"%d", t1);
+	m_team1_score->SetText	(str);
+
+	xr_sprintf					(str,"%d", t2);
+	m_team2_score->SetText	(str);
+	
+	m_pTeamPanels->SetArtefactsCount(t1, t2);
+}
+
+void CUIGameTDM::SetFraglimit(int local_frags, int fraglimit)
+{
+	string64 str;
+	if(fraglimit)
+		xr_sprintf(str,"%d", fraglimit);
+	else
+		xr_sprintf(str,"%s","∞");
+
+	m_pFragLimitIndicator->SetText(str);
+}
+
+void CUIGameTDM::SetBuyMsgCaption(const char* str)
+{
+	if (m_buy_msg_caption)
+	{
+		if (!str)
+			m_buy_msg_caption->SetText("");
+		else
+			m_buy_msg_caption->SetTextST(str);
+	}
+	else
+	{
+		GameCaptions()->setCaption(m_buy_msg_caption_legacy, str, BUY_MSG_COLOR, true);
+	}
+}

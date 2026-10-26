@@ -1,0 +1,67 @@
+#include "stdafx.h"
+#include "ViewportMesh.h"
+
+static void ViewportFocusCallback()
+{
+	LUI->EndEState(esEditLibrary);
+	LUI->EndEState(esEditScene);
+	LUI->BeginEState(esEditCustom);
+}
+
+CViewportMesh::CViewportMesh()
+{
+	View.OnFocusCallback = (xr_delegate<void()>)ViewportFocusCallback;
+	ViewName = "Empty mesh";
+}
+
+CViewportMesh::~CViewportMesh()
+{
+	xr_delete(ViewMesh);
+}
+
+void CViewportMesh::Draw()
+{
+	if (!ImGui::Begin(*ViewName, &bOpen))
+	{
+		ImGui::End();
+		return;
+	}
+
+	if (ImGui::IsWindowFocused())
+	{
+		EContext.UI->ViewID = View.ViewportID;
+	}
+
+	View.DrawVP();
+
+	ImGui::End();
+}
+
+void CViewportMesh::Render()
+{
+	if (EContext.UI->ViewID != View.ViewportID)
+	{
+		return;
+	}
+
+	if (ViewMesh != nullptr)
+	{
+		ViewMesh->OnFrame();
+		ViewMesh->RenderSingle(NULL, Fidentity);
+	}
+}
+
+void CViewportMesh::OpenModel(const xr_path& File)
+{
+	if (ViewMesh != nullptr)
+	{
+		xr_delete(ViewMesh);
+	}
+
+	xr_string Str = File.xstring();
+	ViewMesh = new CEditableObject(Str.c_str());
+
+	xr_strlwr(Str);
+	ViewName = Str.c_str();
+	ViewMesh->Load(Str.c_str());
+}

@@ -1,0 +1,634 @@
+#include "StdAfx.h"
+#include "UICellCustomItems.h"
+#include "UIInventoryUtilities.h"
+#include "../Weapon.h"
+#include "UIDragDropListEx.h"
+#include "../../xrUI/Widgets/UIProgressBar.h"
+#include "../../xrUI/Widgets/UI3dStatic.h"
+#include "../../xrUI/UIVectorBinding.h"
+
+using namespace InventoryUtilities;
+
+namespace detail 
+{
+
+struct is_helper_pred
+{
+	bool operator ()(CUICellItem* child)
+	{
+		return child->IsHelper();
+	}
+
+}; // struct is_helper_pred
+
+} //namespace detail 
+
+
+CUIInventoryCellItem::CUIInventoryCellItem(CInventoryItem* itm)
+{
+	m_pData = (void*)itm;
+
+	const char* icons_texture = READ_IF_EXISTS(pSettings, r_string, itm->m_section_id, "icons_texture", nullptr);
+
+	const bool isRaster = !(pSettings->line_exist(itm->m_section_id, kUIConfigField_InventoryVectorIcon));
+
+	m_grid_size.set(itm->GetInvGridRect().rb);
+	if (isRaster)
+	{
+		inherited::SetShader(GetEquipmentIconsShader(icons_texture));
+
+		Frect rect;
+		rect.lt.set(INV_GRID_WIDTH(itm->ScaleIcon) * itm->GetInvGridRect().x1,
+			INV_GRID_HEIGHT(itm->ScaleIcon) * itm->GetInvGridRect().y1);
+
+		rect.rb.set(rect.lt.x + INV_GRID_WIDTH(itm->ScaleIcon) * m_grid_size.x,
+			rect.lt.y + INV_GRID_HEIGHT(itm->ScaleIcon) * m_grid_size.y);
+
+		inherited::SetTextureRect(rect);
+		inherited::SetStretchTexture(true);
+	}
+	else
+	{
+		Frect rect;
+		rect.lt.set(INV_GRID_WIDTH(itm->ScaleIcon) * itm->GetInvGridRect().x1,
+			INV_GRID_HEIGHT(itm->ScaleIcon) * itm->GetInvGridRect().y1);
+
+		// todo: it is estimated but not real (true) values that render expects and when it applies to polygon so think about how to extract real values... (but probably in most cases should be fine and wouldn't be noticable, but if noticable so I refer to this todo so you need to use accurate and exact values for requested width and height)
+		rect.rb.set(rect.lt.x + INV_GRID_WIDTH(itm->ScaleIcon) * m_grid_size.x,
+			rect.lt.y + INV_GRID_HEIGHT(itm->ScaleIcon) * m_grid_size.y);
+		const float fRequestedWidth = rect.width();
+		const float fRequestedHeight = rect.height();
+
+		Fvector2 vScaled;
+		UI().ClientToScreenScaled(vScaled, fRequestedWidth, fRequestedHeight);
+
+		vScaled.x = fRequestedWidth;
+		vScaled.y = fRequestedHeight;
+
+		xr_string_view iconSubpath{};
+		if (pSettings->line_exist(itm->m_section_id, kUIConfigField_InventoryVectorIcon))
+			iconSubpath = pSettings->r_string(itm->m_section_id, kUIConfigField_InventoryVectorIcon);
+
+		CUIVectorBinding::ApplyVectorPathToStatic(*this, iconSubpath, vScaled.x, vScaled.y, {});
+		inherited::SetStretchTexture(true);
+	}
+
+    // Для 3d иконок
+	static const bool enable3DIcons = EngineExternal()[EEngineExternalGame::Enable3DIcons];
+	if (enable3DIcons)
+    {
+		SetIconVisual(itm->m_3d_static_visual_name);
+		SetBonesVisible(itm->object().Visual()->dcast_PKinematics());
+    }
+}
+
+bool CUIInventoryCellItem::EqualTo(CUICellItem* itm)
+{
+	CUIInventoryCellItem* ci = smart_cast<CUIInventoryCellItem*>(itm);
+	if (!itm)
+	{
+		return false;
+	}
+
+	if (object()->object().cNameSect() != ci->object()->object().cNameSect())
+	{
+		return false;
+	}
+
+	if (!fsimilar(object()->GetCondition(), ci->object()->GetCondition(), 0.01f))
+	{
+		return false;
+	}
+
+	if (!object()->equal_upgrades(ci->object()->upgardes()))
+	{
+		return false;
+	}
+
+	CEatableItem* CiEatableItem = ci->object()->cast_eatable_item();
+	CEatableItem* EatableItem = object()->cast_eatable_item();
+
+	if (CiEatableItem != nullptr && EatableItem != nullptr && CiEatableItem->GetMaxUses() > 1 && EatableItem->GetMaxUses() > 1 && CiEatableItem->GetRemainingUses() != EatableItem->GetRemainingUses())
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool CUIInventoryCellItem::IsHelperOrHasHelperChild()
+{
+	return std::count_if(m_childs.begin(), m_childs.end(), ::detail::is_helper_pred()) > 0 || IsHelper();
+}
+
+CUIDragItem* CUIInventoryCellItem::CreateDragItem()
+{
+	return IsHelperOrHasHelperChild() ? nullptr : inherited::CreateDragItem();
+}
+
+bool CUIInventoryCellItem::IsHelper ()
+{
+	return object()->is_helper_item();
+}
+
+void CUIInventoryCellItem::SetIsHelper (bool is_helper)
+{
+	object()->set_is_helper(is_helper);
+}
+
+void CUIInventoryCellItem::Update()
+{
+	inherited::Update	();
+	inherited::UpdateConditionProgressBar(); //Alundaio
+	UpdateItemText();
+
+	u32 color = GetTextureColor();
+	if ( IsHelper() && !ChildsCount() )
+	{
+		color = 0xbbbbbbbb;
+	}
+	else if ( IsHelperOrHasHelperChild() )
+	{
+		color = 0xffffffff;
+	}
+
+	SetTextureColor(color);
+}
+
+void CUIInventoryCellItem::UpdateItemText()
+{
+	const u32	helper_count	=  	(u32)std::count_if(m_childs.begin(), m_childs.end(), ::detail::is_helper_pred()) 
+									+ (IsHelper() ? 1 : 0);
+
+	const u32	count			=	ChildsCount() + 1 - helper_count;
+
+    string32 tempStr;
+    const char* finalText = nullptr;
+    if (count > 1 || helper_count)
+    {
+        xr_sprintf(tempStr, "%s%d", EngineExternal().GetInventoryItemCountPrefix().c_str(), count);
+        finalText = tempStr;
+    }
+
+    if (m_text)
+	{
+        m_text->Show(nullptr != finalText);
+        m_text->SetText(finalText);
+	}
+	else
+	{
+		this->SetText(finalText);
+	}
+}
+
+CUIAmmoCellItem::CUIAmmoCellItem(CWeaponAmmo* itm)
+:inherited(itm)
+{}
+
+bool CUIAmmoCellItem::EqualTo(CUICellItem* itm)
+{
+	if(!inherited::EqualTo(itm))	return false;
+
+	CUIAmmoCellItem* ci				= smart_cast<CUIAmmoCellItem*>(itm);
+	if(!ci)							return false;
+
+	return					( (object()->cNameSect() == ci->object()->cNameSect()) );
+}
+
+CUIDragItem* CUIAmmoCellItem::CreateDragItem()
+{
+	return IsHelper() ? nullptr : inherited::CreateDragItem();
+}
+
+u32 CUIAmmoCellItem::CalculateAmmoCount()
+{
+	u32 total = IsHelper() ? 0 : object()->m_boxCurr;
+	for (CUICellItem* child : m_childs)
+	{
+		if (!child->IsHelper())
+		{
+			total += ((CUIAmmoCellItem*)(child))->object()->m_boxCurr;
+		}
+	}
+
+	return total;
+}
+
+void CUIAmmoCellItem::UpdateItemText()
+{
+    string32 tempStr;
+    const char* finalText = nullptr;
+	if ( !m_custom_draw )
+	{
+        xr_sprintf(tempStr, "%d", CalculateAmmoCount());
+        finalText = tempStr;
+    }
+		
+    if (m_text)
+    {
+        m_text->Show(nullptr != finalText);
+        m_text->SetText(finalText);
+    }
+    else
+    {
+        this->SetText(finalText);
+	}
+}
+
+CUIWeaponCellItem::CUIWeaponCellItem(CWeapon* itm)
+:inherited(itm)
+{
+	m_addons[eSilencer]		= nullptr;
+	m_addons[eScope]		= nullptr;
+	m_addons[eLauncher]		= nullptr;
+
+	if(itm->IsSilencerAttachable())
+	{
+		m_addon_offset[eSilencer].set(object()->GetSilencerX(), object()->GetSilencerY());
+	}
+
+	if (itm->IsScopeAttachable())
+	{
+		m_addon_offset[eScope].set(object()->GetScopeX(), object()->GetScopeY());
+		mScopeBack = object()->GetScopeBack();
+	}
+
+	if (itm->IsGrenadeLauncherAttachable())
+	{
+		m_addon_offset[eLauncher].set(object()->GetGrenadeLauncherX(), object()->GetGrenadeLauncherY());
+	}
+}
+
+#include "../xrServerEntities/object_broker.h"
+CUIWeaponCellItem::~CUIWeaponCellItem()
+{
+}
+
+bool CUIWeaponCellItem::is_scope()
+{
+	return object()->IsScopeAttachable() && object()->IsScopeAttached();
+}
+
+bool CUIWeaponCellItem::is_silencer()
+{
+	return object()->IsSilencerAttachable() && object()->IsSilencerAttached();
+}
+
+bool CUIWeaponCellItem::is_launcher()
+{
+	return object()->IsGrenadeLauncherAttachable() && object()->IsGrenadeLauncherAttached();
+}
+
+void CUIWeaponCellItem::CreateIcon(eAddonType t)
+{
+	if(m_addons[t])				return;
+	m_addons[t]					= new CUIStatic();	
+	m_addons[t]->SetAutoDelete	(true);
+	AttachChild					(m_addons[t]);
+
+	const char* sect = nullptr;
+	if (t == eSilencer) sect = *object()->GetSilencerName();
+	else if (t == eScope) sect = *object()->GetScopeName();
+	else if (t == eLauncher) sect = *object()->GetGrenadeLauncherName();
+
+	m_addons[t]->SetShader(GetEquipmentIconsShader(object()->IconsTexture.c_str()));
+
+	u32 color = GetTextureColor	();
+	m_addons[t]->SetTextureColor(color);
+}
+
+void CUIWeaponCellItem::DestroyIcon(eAddonType t)
+{
+	if (!m_addons[t]) return;
+
+	DetachChild		(m_addons[t]);
+	m_addons[t]		= nullptr;
+}
+
+CUIStatic* CUIWeaponCellItem::GetIcon(eAddonType t)
+{
+	return m_addons[t];
+}
+void CUIWeaponCellItem::RefreshOffset()
+{
+	if (object()->IsSilencerAttachable())
+	{
+		m_addon_offset[eSilencer].set(object()->GetSilencerX(), object()->GetSilencerY());
+	}
+
+	if (object()->IsScopeAttachable())
+	{
+		m_addon_offset[eScope].set(object()->GetScopeX(), object()->GetScopeY());
+		mScopeBack = object()->GetScopeBack();
+	}
+
+	if (object()->IsGrenadeLauncherAttachable())
+	{
+		m_addon_offset[eLauncher].set(object()->GetGrenadeLauncherX(), object()->GetGrenadeLauncherY());
+	}
+}
+
+void CUIWeaponCellItem::Draw()
+{
+	if (GetIcon(eScope) && mScopeBack)
+	{
+		GetIcon(eScope)->Draw();
+		GetIcon(eScope)->SetAutoDelete(false);
+		DetachChild(GetIcon(eScope));
+	}
+
+	inherited::Draw();
+
+	if (GetIcon(eScope) && mScopeBack)
+	{
+		GetIcon(eScope)->SetAutoDelete(true);
+		AttachChild(GetIcon(eScope));
+	}
+
+
+	if(m_upgrade && m_upgrade->IsShown())
+		m_upgrade->Draw();
+};
+
+void CUIWeaponCellItem::Update()
+{
+	bool b						= Heading();
+	inherited::Update			();
+	
+	bool bForceReInitAddons		= (b!=Heading());
+
+	static const bool enable3DIcons = EngineExternal()[EEngineExternalGame::Enable3DIcons];
+	if (object()->IsSilencerAttachable())
+	{
+		if (object()->IsSilencerAttached() && !enable3DIcons)
+		{
+			if (m_last_icons[eSilencer] != object()->GetSilencerName())
+			{
+				m_last_icons[eSilencer] = object()->GetSilencerName();
+				DestroyIcon(eSilencer);
+			}
+
+			if (!GetIcon(eSilencer) || bForceReInitAddons)
+			{
+				CreateIcon	(eSilencer);
+				RefreshOffset();
+				InitAddon	(GetIcon(eSilencer), *object()->GetSilencerName(), m_addon_offset[eSilencer], Heading());
+			}
+        }
+		else if (GetIcon(eSilencer))
+			DestroyIcon(eSilencer);
+	}
+
+	if (object()->IsScopeAttachable())
+	{
+		if (object()->IsScopeAttached() && !enable3DIcons)
+		{
+			if (m_last_icons[eScope] != object()->GetScopeName())
+			{
+				m_last_icons[eScope] = object()->GetScopeName();
+				DestroyIcon(eScope);
+			}
+
+			if (!GetIcon(eScope) || bForceReInitAddons)
+			{
+				CreateIcon(eScope);
+				RefreshOffset();
+				InitAddon(GetIcon(eScope), *object()->GetScopeName(), m_addon_offset[eScope], Heading());
+			}
+		}
+		else if (GetIcon(eScope))
+			DestroyIcon(eScope);
+	}
+
+	if (object()->IsGrenadeLauncherAttachable())
+    {
+		if (object()->IsGrenadeLauncherAttached() && !enable3DIcons)
+		{
+			if (m_last_icons[eLauncher] != object()->GetGrenadeLauncherName())
+			{
+				m_last_icons[eLauncher] = object()->GetGrenadeLauncherName();
+				DestroyIcon(eLauncher);
+			}
+
+			if (!GetIcon(eLauncher) || bForceReInitAddons)
+			{
+				CreateIcon	(eLauncher);
+				RefreshOffset();
+				InitAddon	(GetIcon(eLauncher), *object()->GetGrenadeLauncherName(), m_addon_offset[eLauncher], Heading());
+			}
+		}
+		else if (GetIcon(eLauncher))
+			DestroyIcon(eLauncher);
+	}
+
+	{
+		if (auto pItem = (CInventoryItem*)m_pData)
+		{
+			if (auto pWeapon = pItem->cast_weapon())
+			{
+				pWeapon->UpdateAddonsVisibility();
+				pWeapon->ForceUpdateHUD();
+				pWeapon->ProcessScope();
+			}
+
+			if (enable3DIcons)
+			{
+				SetIconVisual(pItem->m_3d_static_visual_name);
+			}
+			SetBonesVisible(pItem->object().Visual()->dcast_PKinematics());
+		}
+	}
+}
+
+void CUIWeaponCellItem::SetTextureColor( u32 color )
+{
+	inherited::SetTextureColor( color );
+	if ( m_addons[eSilencer] )
+	{
+		m_addons[eSilencer]->SetTextureColor( color );
+	}
+	if ( m_addons[eScope] )
+	{
+		m_addons[eScope]->SetTextureColor( color );
+	}
+	if ( m_addons[eLauncher] )
+	{
+		m_addons[eLauncher]->SetTextureColor( color );
+	}
+}
+
+void CUIWeaponCellItem::OnAfterChild(CUIDragDropListEx* parent_list)
+{
+	if(is_silencer() && GetIcon(eSilencer))
+	{
+		InitAddon(GetIcon(eSilencer), *object()->GetSilencerName(), m_addon_offset[eSilencer], parent_list->GetVerticalPlacement());
+	}
+
+	if(is_scope() && GetIcon(eScope))
+	{
+		InitAddon(GetIcon(eScope), *object()->GetScopeName(), m_addon_offset[eScope], parent_list->GetVerticalPlacement());
+	}
+
+	if(is_launcher() && GetIcon(eLauncher))
+	{
+		InitAddon(GetIcon(eLauncher), *object()->GetGrenadeLauncherName(), m_addon_offset[eLauncher], parent_list->GetVerticalPlacement());
+	}
+
+	if (auto pItem = (CInventoryItem*)m_pData)
+	{
+		if (auto pWeapon = pItem->cast_weapon())
+		{
+			pWeapon->UpdateAddonsVisibility();
+			pWeapon->ForceUpdateHUD();
+			pWeapon->ProcessScope();
+		}
+
+		if (EngineExternal()[EEngineExternalGame::Enable3DIcons])
+		{
+			SetIconVisual(pItem->m_3d_static_visual_name);
+		}
+		SetBonesVisible(pItem->object().Visual()->dcast_PKinematics());
+	}
+}
+
+void CUIWeaponCellItem::InitAddon(CUIStatic* s, const char* section, Fvector2 addon_offset, bool b_rotate)
+{
+	Frect tex_rect;
+	Fvector2 base_scale;
+
+	InventoryIconParams icons_struct = GetInventoryIconParams(section);
+	float scaleIcon = icons_struct.scaleIcon;
+	if (Heading())
+	{
+		base_scale.x = GetHeight() / (INV_GRID_WIDTH(scaleIcon) * m_grid_size.x);
+		base_scale.y = GetWidth() / (INV_GRID_HEIGHT(scaleIcon) * m_grid_size.y);
+	}
+	else
+	{
+		base_scale.x = GetWidth() / (INV_GRID_WIDTH(scaleIcon) * m_grid_size.x);
+		base_scale.y = GetHeight() / (INV_GRID_HEIGHT(scaleIcon) * m_grid_size.y);
+	}
+
+	Fvector2 cell_size;
+	cell_size.x = icons_struct.inv_grid_width * INV_GRID_WIDTH(scaleIcon);
+	cell_size.y = icons_struct.inv_grid_height * INV_GRID_HEIGHT(scaleIcon);
+
+	tex_rect.x1 = icons_struct.inv_grid_x * INV_GRID_WIDTH(scaleIcon);
+	tex_rect.y1 = icons_struct.inv_grid_y * INV_GRID_HEIGHT(scaleIcon);
+
+	tex_rect.rb.add(tex_rect.lt, cell_size);
+
+	cell_size.mul(base_scale);
+
+	if (b_rotate)
+	{
+		s->SetWndSize(Fvector2().set(cell_size.y, cell_size.x));
+		Fvector2 new_offset;
+		new_offset.x = addon_offset.y * base_scale.y;
+		new_offset.y = GetHeight() - addon_offset.x * base_scale.x - cell_size.x;
+		addon_offset = new_offset;
+		addon_offset.x *= UI().get_current_kx();
+	} 
+	else if (Heading() && !b_rotate)
+	{
+		addon_offset.mul(base_scale);
+		addon_offset.x *= UI().get_current_kx();
+		cell_size.x *= UI().get_current_kx();
+		s->SetWndSize(cell_size);
+	}
+	else
+	{
+		s->SetWndSize(cell_size);
+		addon_offset.mul(base_scale);
+	}
+
+	s->SetWndPos(addon_offset);
+	s->SetTextureRect(tex_rect);
+	s->SetStretchTexture(true);
+
+	s->EnableHeading(b_rotate);
+
+	if (b_rotate) {
+		s->SetHeading(GetHeading());
+		Fvector2 offs;
+		offs.set(0.0f, s->GetWndSize().y);
+		s->SetHeadingPivot(Fvector2().set(0.0f, 0.0f), /*Fvector2().set(0.0f,0.0f)*/offs, true);
+	}
+}
+
+CUIDragItem* CUIWeaponCellItem::CreateDragItem()
+{
+	CUIDragItem* i		= inherited::CreateDragItem();
+	CUIStatic* s		= nullptr;
+
+	if(GetIcon(eSilencer))
+	{
+		s				= new CUIStatic(); s->SetAutoDelete(true);
+		auto section = *object()->GetSilencerName();
+		s->SetShader	(GetEquipmentIconsShader(*object()->IconsTexture));
+		InitAddon		(s, section, m_addon_offset[eSilencer], false);
+		s->SetTextureColor(i->wnd()->GetTextureColor());
+		i->wnd			()->AttachChild	(s);
+	}
+	
+	if(GetIcon(eScope))
+	{
+		s				= new CUIStatic(); s->SetAutoDelete(true);
+		auto section = *object()->GetScopeName();
+		s->SetShader	(GetEquipmentIconsShader(*object()->IconsTexture));
+		InitAddon		(s,	*object()->GetScopeName(),		m_addon_offset[eScope], false);
+		s->SetTextureColor(i->wnd()->GetTextureColor());
+		i->wnd			()->AttachChild	(s);
+	}
+
+	if(GetIcon(eLauncher))
+	{
+		s				= new CUIStatic(); s->SetAutoDelete(true);
+		auto section = *object()->GetGrenadeLauncherName();
+		s->SetShader	(GetEquipmentIconsShader(*object()->IconsTexture));
+		InitAddon		(s, *object()->GetGrenadeLauncherName(),m_addon_offset[eLauncher], false);
+		s->SetTextureColor(i->wnd()->GetTextureColor());
+		i->wnd			()->AttachChild	(s);
+	}
+	return				i;
+}
+
+bool CUIWeaponCellItem::EqualTo(CUICellItem* itm)
+{
+	if(!inherited::EqualTo(itm))	return false;
+
+	CUIWeaponCellItem* ci			= smart_cast<CUIWeaponCellItem*>(itm);
+	if(!ci)							return false;
+
+//	bool b_addons					= ( (object()->GetAddonsState() == ci->object()->GetAddonsState()) );
+	if ( object()->GetAddonsState() != ci->object()->GetAddonsState() )
+	{
+		return false;
+	}
+	if(this->is_scope() && ci->is_scope())
+	{
+		if ( object()->GetScopeName() != ci->object()->GetScopeName() )
+		{
+			return false;
+		}
+	}
+//	bool b_place					= ( (object()->m_eItemCurrPlace == ci->object()->m_eItemCurrPlace) );
+
+	return true;
+}
+
+CBuyItemCustomDrawCell::CBuyItemCustomDrawCell	(const char* str, CGameFont* pFont)
+{
+	m_pFont		= pFont;
+	VERIFY		(xr_strlen(str)<16);
+	xr_strcpy		(m_string,str);
+}
+
+void CBuyItemCustomDrawCell::OnDraw(CUICellItem* cell)
+{
+	Fvector2							pos;
+	cell->GetAbsolutePos				(pos);
+	UI().ClientToScreenScaled			(pos, pos.x, pos.y);
+	m_pFont->Out						(pos.x, pos.y, m_string);
+	m_pFont->OnRender					();
+}

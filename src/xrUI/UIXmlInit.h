@@ -1,0 +1,123 @@
+#pragma once
+
+#include "xrUIXmlParser.h"
+#include "ui_defs.h"
+
+class ITextureOwner;
+class CUIWindow;
+class CUIFrameWindow;
+class CUIStaticItem;
+class CUIStatic;
+class CUICheckButton;
+class CUICustomSpin;
+class CUIButton;
+class CUI3tButton;
+class CUIDragDropList;
+class CUIProgressBar;
+class CUIProgressShape;
+class CUIItemStateDisplay;
+class CUITabControl;
+class CUIFrameLineWnd;
+class CUIEditBoxEx;
+class CUIEditBox;
+class CUICustomEdit;
+class CUIAnimatedStatic;
+class CUIOptionsItem;
+class CUIScrollView;
+class CUIListWnd;
+class CUIListBox;
+class CUIStatsPlayerList;
+class CUIDragDropListEx;
+class CUIComboBox;
+class CUITabButtonMP;
+class CUITrackBar;
+class CUIArrowStepper;
+class UIHintWindow;
+class CUILines;
+class CUILoadingScreenProgress;
+class CUIStackPanel;
+class CUIMultiTextStatic;
+class CUITextBanner;
+class CUIGamepadLegend;
+
+class UI_API CUIXmlInit
+{
+public:
+					CUIXmlInit				();
+	virtual			~CUIXmlInit				();
+		
+	static bool 	InitWindow				(CUIXml& xml_doc, const char* path, int index, CUIWindow* pWnd, bool fatal = true);
+	static bool 	InitFrameWindow			(CUIXml& xml_doc, const char* path, int index, CUIFrameWindow* pWnd, bool fatal = true);
+	static bool 	InitFrameLine			(CUIXml& xml_doc, const char* path, int index, CUIFrameLineWnd* pWnd, bool fatal = true);
+	static bool 	InitCustomEdit			(CUIXml& xml_doc, const char* paht, int index, CUICustomEdit* pWnd);
+	static bool 	InitEditBox				(CUIXml& xml_doc, const char* paht, int index, CUIEditBox* pWnd);
+	static bool 	InitStatic				(CUIXml& xml_doc, const char* path, int index, CUIStatic* pWnd, bool fatal = true);
+	static bool 	InitStackPanel			(CUIXml& xml_doc, const char* path, int index, CUIStackPanel* pWnd, bool fatal = true);
+	static bool 	InitGamepadLegend		(CUIXml& xml_doc, const char* path, int index, CUIGamepadLegend* pWnd, bool fatal = true);
+	static bool		InitCheck				(CUIXml& xml_doc, const char* path, int index, CUICheckButton* pWnd);
+	static bool 	InitSpin				(CUIXml& xml_doc, const char* path, int index, CUICustomSpin* pWnd);
+	static bool 	InitText				(CUIXml& xml_doc, const char* path, int index, CUIStatic* pWnd);
+	static bool 	InitText				(CUIXml& xml_doc, const char* path, int index, CUILines* pLines);
+	static bool 	Init3tButton			(CUIXml& xml_doc, const char* path, int index, CUI3tButton* pWnd, bool fatal = true);
+	static bool 	InitProgressBar			(CUIXml& xml_doc, const char* path, int index, CUIProgressBar* pWnd, bool fatal = true);
+	static bool 	InitItemStateDisplay		(CUIXml& xml_doc, const char* path, int index, CUIItemStateDisplay* pWnd);
+	static bool 	InitProgressShape		(CUIXml& xml_doc, const char* path, int index, CUIProgressShape* pWnd);
+	static bool 	InitLoadscreenProgress	(CUIXml& xml_doc, const char* path, int index, CUILoadingScreenProgress* pWnd);
+	static bool 	InitFont				(CUIXml& xml_doc, const char* path, int index, u32 &color, CGameFont *&pFnt);
+	static bool 	InitTabButtonMP			(CUIXml& xml_doc, const char* path, int index, CUITabButtonMP *pWnd);
+	static bool 	InitTabControl			(CUIXml& xml_doc, const char* path, int index, CUITabControl *pWnd);
+	static bool 	InitAnimatedStatic		(CUIXml& xml_doc, const char* path, int index, CUIAnimatedStatic *pWnd);
+	static bool 	InitTextureOffset		(CUIXml& xml_doc, const char* path, int index, CUIStatic* pWnd);
+	static bool 	InitSound				(CUIXml& xml_doc, const char* path, int index, CUI3tButton* pWnd);
+	static bool 	InitMultiTexture		(CUIXml& xml_doc, const char* path, int index, CUI3tButton* pWnd, bool fatal = true);
+	static bool 	InitTexture				(CUIXml& xml_doc, const char* path, int index, ITextureOwner* pWnd, bool fatal = true);
+	static bool 	InitOptionsItem			(CUIXml& xml_doc, const char* paht, int index, CUIOptionsItem* pWnd);
+	static bool 	InitScrollView			(CUIXml& xml_doc, const char* path, int index, CUIScrollView* pWnd, bool fatal = true);
+	static bool		InitListWnd				(CUIXml& xml_doc, const char* path, int index, CUIListWnd* pWnd, bool fatal = true);
+	static bool 	InitListBox				(CUIXml& xml_doc, const char* path, int index, CUIListBox* pWnd);
+	static bool		InitComboBox			(CUIXml& xml_doc, const char* path, int index, CUIComboBox* pWnd);
+	static bool		InitTrackBar			(CUIXml& xml_doc, const char* path, int index, CUITrackBar* pWnd);
+	static bool		InitArrowStepper		(CUIXml& xml_doc, const char* path, int index, CUIArrowStepper* pWnd);
+	static bool 	InitHintWindow			(CUIXml& xml_doc, const char* path, int index, UIHintWindow* pWnd);
+	static Frect	GetFRect				(CUIXml& xml_doc, const char* path, int index);
+	static u32		GetColor				(CUIXml& xml_doc, const char* path, int index, u32 def_clr);
+	static void		ReadShadowsNode			(CUIXml& xml_doc, const char* parentPath, int index, SUIOutlineParams& out);
+	static void		ApplyShadowsToStatic	(CUIXml& xml_doc, const char* parentPath, int index, CUIStatic* pWnd);
+	static void		ApplyShadowsToLines		(CUIXml& xml_doc, const char* parentPath, int index, CUILines* pLines);
+	static u32		GetGradientColor		(CUIXml& xml_doc, const char* path, int index, u32 def_clr);
+	static bool		InitMultiTextStatic		(CUIXml& xml_doc, const char* path, int index, CUIMultiTextStatic* pWnd);
+	static bool		InitTextBanner			(CUIXml& xml_doc, const char* path, int index, CUITextBanner* pBnr);
+public:
+
+	static bool		InitAlignment(CUIXml &xml_doc, const char *path,
+											  int index, float &x, float &y,CUIWindow* pWnd);
+
+
+	static void		InitAutoStaticGroup(CUIXml& xml_doc, const char* path, int index, CUIWindow* pParentWnd);
+
+	static float	ApplyAlignX(float coord, u32 align);
+	static float	ApplyAlignY(float coord, u32 align);
+	static void		ApplyAlign(float &x, float &y, u32 align);
+
+	// Initialize and store predefined colors
+	using ColorDefs = xr_map<shared_str, u32>;
+	using ColorDefs_it = ColorDefs::iterator;
+
+	static const ColorDefs		*GetColorDefs()		{ R_ASSERT(m_pColorDefs); return m_pColorDefs; }
+
+	static void		InitColorDefs				();
+	static void		DeleteColorDefs				()	{ xr_delete(m_pColorDefs); }
+	static void		AssignColor					(const char* name, u32 clr);
+private:
+	static	ColorDefs			*m_pColorDefs;
+
+	static shared_str m_Graffiti19RussiaFontName;
+	static shared_str m_Graffiti22RussiaFontName;
+	static shared_str m_Graff32FontName;
+	static shared_str m_Graff50FontName;
+	static shared_str m_Arial14FontName;
+	static shared_str m_Arial21FontName;
+	static shared_str m_Letterica16FontName;
+	static shared_str m_Letterica18FontName;
+	static shared_str m_Letter25FontName;
+};

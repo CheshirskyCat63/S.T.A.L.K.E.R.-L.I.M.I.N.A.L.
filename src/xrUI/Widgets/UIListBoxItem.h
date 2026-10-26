@@ -1,0 +1,49 @@
+#pragma once
+#include "UIFrameLineWnd.h"
+
+class CUIStatic;
+
+class UI_API CUIListBoxItem :
+	public CUIFrameLineWnd, 
+	public CUISelectable
+{
+	typedef				CUIFrameLineWnd inherited;
+public:
+						CUIListBoxItem			(float height);
+
+	virtual void		Draw					();
+	virtual bool		OnMouseDown				(int mouse_btn);
+	virtual void		OnFocusReceive			();
+			void		InitDefault				();
+			void		SetTAG					(u32 value);
+			u32			GetTAG					();
+
+			void		SetData					(void* data);
+			void*		GetData					();
+
+		CUIStatic*		AddTextField			(const char* txt, float width);
+		CUIStatic*		AddIconField			(float width);
+
+		CUIStatic*		GetTextItem				(){return m_text;}
+
+		//TextControl
+		void			SetText					(const char* txt);
+		const char*			GetText					();
+		void			SetTextColor			(u32 color);
+		u32				GetTextColor			();
+		void			SetFont					(CGameFont* F);
+		CGameFont*		GetFont					();
+
+	virtual CUIWindow* ui_cast_window() { return this; }
+	virtual CUIListBoxItem* ui_cast_list_box_item() { return this; }
+	virtual CUISelectable* ui_cast_selectable() { return this; }
+			void		SendSelectionCallback	();
+			void		SendClickCallback		();
+
+protected:
+		CUIStatic*		m_text;
+		u32				tag;
+		void*			pData;
+		float			FieldsLength			() const;
+};
+

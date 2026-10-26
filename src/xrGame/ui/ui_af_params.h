@@ -1,0 +1,56 @@
+#pragma once
+#include "../../xrUI/Widgets/UIWindow.h"
+#include "../../xrEngine/AI/alife_space.h"
+#include "../../xrUI/Widgets/UIStatic.h"
+#include "UIItemParam.h"
+
+class CUIXml;
+
+using UIArtefactParamItem = UIItemParam;
+class CInventoryItem;
+
+class CUIArtefactParams final : public CUIWindow
+{
+public:
+	enum class CParamType
+	{
+		eParamTypeOutfit,
+		eParamTypeArtefact,
+		eParamTypeBackpack
+	};
+
+					CUIArtefactParams		(const CParamType& type);
+	virtual			~CUIArtefactParams		();
+			void	InitFromXml				(CUIXml& xml);
+			bool	Check					(const shared_str& af_section);
+			void	SetInfo					(CInventoryItem& pInvItem);
+
+	virtual CUIWindow* ui_cast_window() { return this; }
+
+protected:
+    UIArtefactParamItem* CreateItem(CUIXml& uiXml, const char* section,
+        shared_str translationId, shared_str translationId2 = nullptr);
+	
+    UIArtefactParamItem* CreateItem(CUIXml& uiXml, const char* section,
+        float magnitude, bool isSignInverse, const shared_str& unit,
+        shared_str translationId, shared_str translationId2 = nullptr);
+
+	UIArtefactParamItem*	m_immunity_item[ALife::eHitTypeWound_2];
+	UIArtefactParamItem*	m_restore_item[ALife::eRestoreTypeMax];
+	UIArtefactParamItem*	m_disp_condition;
+	UIArtefactParamItem*	m_additional_weight;
+	UIArtefactParamItem*	m_af_slots;
+	UIArtefactParamItem*	m_jump_height_modifier;
+	UIArtefactParamItem*	m_movement_speed_modifier;
+	UIArtefactParamItem*	m_sleepiness_restore_speed;
+	UIArtefactParamItem*	m_equipment_durability_modifier;
+	UIArtefactParamItem*	m_inventory_weight_modifier;
+
+	CUIStatic*				m_Prop_line;
+
+	CParamType				object_type;
+
+	bool is_artefact() const { return object_type == CParamType::eParamTypeArtefact; }
+	bool is_backpack() const { return object_type == CParamType::eParamTypeBackpack; }
+
+}; // class CUIArtefactParams

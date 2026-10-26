@@ -1,0 +1,61 @@
+#pragma once
+#include "UIStatic.h"
+#include "../../xrEngine/VisMask.h"
+
+class IRenderVisual;
+class IKinematics;
+
+class UI_API CUI3dStatic : 
+    public CUIStatic
+{
+	typedef CUIStatic inherited;
+
+public:
+
+					CUI3dStatic		();
+	virtual			~CUI3dStatic	();
+
+	IC void			SetXYZ			(Fvector& _xyz) { mRotate.setXYZ(_xyz); }
+	IC void			SetXYZ			(float x, float y, float z) { mRotate.setXYZ(x, y, z); }
+	
+	IC void			SetHPB			(Fvector& _hpb) { mRotate.setHPB(_hpb.x, _hpb.y, _hpb.z); }
+	IC void			SetHPB			(float h, float p, float b) { mRotate.setHPB(h, p, b); }
+
+	Fvector			GetXYZ			() const;
+	Fvector			GetHPB			() const;
+
+			void	SetVisual		(IRenderVisual* pVisual);
+			void	SetVisual		(const shared_str& cVisualName);
+	void SetIconVisual(const shared_str& Name);
+	void CaptureIconBones();
+
+	void Draw() override;
+
+	void SetScaleFactor(float fScale) { fScaleFactor = fScale; }
+	void SetIconOffset(const Fvector2& Offset) { IconOffset = Offset; }
+	const Fvector2& GetIconOffset() const { return IconOffset; }
+	float GetScaleFactor() { return fScaleFactor; }
+	void SetCaptMoving(bool bMoving) { m_bCaptMoving = bMoving; }
+	bool IsCaptMoving() { return m_bCaptMoving; }
+
+	IRenderVisual* GetVisual();
+	void SetBonesVisible(IKinematics* pVisual);
+
+protected:
+	static void GetRealBoundBox(IKinematics* m_model, Fmatrix& xform, Fbox& bbox);
+	void FromScreenToItem(int x_screen, int y_screen, float& x_item, float& y_item);
+
+	IRenderVisual* pCurrentVisual = nullptr;
+	bool IsCachedIcon = false;
+	VisMask IconBones;
+	void ReleaseVisual();
+	void ApplyIconBones();
+
+	float fViewportNear, fViewportDist, fViewportAspect;
+	float fViewportFOV, fViewportSize;
+	bool m_bCaptMoving;
+
+	Fmatrix mView, mInvView, mProject, mRotate;
+	float fScaleFactor;
+	Fvector2 IconOffset{};
+};

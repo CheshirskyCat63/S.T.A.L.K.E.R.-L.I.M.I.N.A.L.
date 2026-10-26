@@ -1,0 +1,12 @@
+/build/
+/game/
+/.stage/
+/content/.stage/
+*.pyc
+__pycache__/
+*.obj
+*.pdb
+*.ilk
+*.log
+*.tmp
+/tools/movement/*-local.json

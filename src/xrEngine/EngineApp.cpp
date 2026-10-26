@@ -1,0 +1,441 @@
+#include "stdafx.h"
+#include "x_ray.h"
+#include "IGame_Level.h"
+#include "IGame_Persistent.h"
+#include "XR_IOConsole.h"
+#include "std_classes.h"
+#include "../xrCore/Collision/ISpatial.h"
+#include "ILoadingScreen.h"
+
+ENGINE_API bool g_appLoaded = false;
+
+CEngineApp::CEngineApp()
+{
+	ll_dwReference = 0;
+
+	max_load_stage = 0;
+
+	// events
+	g_pEventManager->Attach(this);
+
+	// levels
+	Level_Current = u32(-1);
+	
+	if (Device.IsEditorMode())
+		return;
+
+	Level_Scan();
+
+	// Register us
+	Device.seqFrame.Add(this, REG_PRIORITY_HIGH + 1000);
+
+	Console->Show();
+
+	// App Title
+	GLoadingScreen = nullptr;
+}
+
+CEngineApp::~CEngineApp()
+{
+	if (Console != nullptr)
+		Console->Hide();
+
+	if (DevicePtr != nullptr && !Device.IsEditorMode())
+	{
+		Device.seqFrame.Remove(this);
+	}
+
+	// events
+	g_pEventManager->Detach(this);
+}
+
+extern volatile bool quiting;
+
+void CEngineApp::OnEvent(EVENT E, u64 P1, u64 P2)
+{
+	g_pEventManager->OnEvent(E, P1, P2);
+
+	if (E == g_pEventManager->eQuit)
+	{
+		quiting = true;
+		for (u32 i = 0; i < Levels.size(); i++)
+		{
+			xr_free(Levels[i].folder);
+			xr_free(Levels[i].name);
+		}
+		Levels.clear();
+	}
+	else if (E == g_pEventManager->eStart)
+	{
+		PROF_EVENT("eStart");
+		LPSTR		op_server = LPSTR(P1);
+		LPSTR		op_client = LPSTR(P2);
+		Level_Current = u32(-1);
+		R_ASSERT(0 == g_pGameLevel);
+		R_ASSERT(0 != g_pGamePersistent);
+
+#ifdef NO_SINGLE
+		Console->Execute("main_menu on");
+		if ((op_server == nullptr) ||
+			(!xr_strlen(op_server)) ||
+			(
+				(strstr(op_server, "/dm") || strstr(op_server, "/deathmatch") ||
+					strstr(op_server, "/tdm") || strstr(op_server, "/teamdeathmatch") ||
+					strstr(op_server, "/ah") || strstr(op_server, "/artefacthunt") ||
+					strstr(op_server, "/cta") || strstr(op_server, "/capturetheartefact")
+					) &&
+				!strstr(op_server, "/alife")
+				)
+			)
+#endif // #ifdef NO_SINGLE
+		{
+			Console->Execute("main_menu off");
+			Console->Hide();
+			//-----------------------------------------------------------
+			g_pGamePersistent->PreStart(op_server);
+			//-----------------------------------------------------------
+			g_pGameLevel = (IGame_Level*)NEW_INSTANCE(CLSID_GAME_LEVEL);
+			pApp->LoadBegin();
+			g_pGamePersistent->Start(op_server);
+			g_pGameLevel->net_Start(op_server, op_client);
+			pApp->LoadEnd();
+		}
+		xr_free(op_server);
+		xr_free(op_client);
+	}
+	else if (E == g_pEventManager->eDisconnect)
+	{
+		if (g_pGameLevel)
+		{
+			Console->Hide();
+			g_pGameLevel->net_Stop();
+			DEL_INSTANCE(g_pGameLevel);
+			Console->Show();
+
+			if ((false == g_pEventManager->Event.Peek("KERNEL:quit")) && (false == g_pEventManager->Event.Peek("KERNEL:start")))
+			{
+				Console->Execute("main_menu off");
+				Console->Execute("main_menu on");
+			}
+		}
+		R_ASSERT(0 != g_pGamePersistent);
+		g_pGamePersistent->Disconnect();
+	}
+	else if (E == g_pEventManager->eConsole)
+	{
+		LPSTR command = (LPSTR)P1;
+		Console->ExecuteCommand(command, false);
+		xr_free(command);
+	}
+	else if (E == g_pEventManager->eStartMPDemo)
+	{
+		LPSTR demo_file = LPSTR(P1);
+
+		R_ASSERT(0 == g_pGameLevel);
+		R_ASSERT(0 != g_pGamePersistent);
+
+		Console->Execute("main_menu off");
+		Console->Hide();
+		Device.Reset(false);
+
+		g_pGameLevel = (IGame_Level*)NEW_INSTANCE(CLSID_GAME_LEVEL);
+		shared_str server_options = g_pGameLevel->OpenDemoFile(demo_file);
+
+		//-----------------------------------------------------------
+		g_pGamePersistent->PreStart(server_options.c_str());
+		//-----------------------------------------------------------
+
+		pApp->LoadBegin();
+		g_pGamePersistent->Start("");//server_options.c_str()); - no prefetch !
+		g_pGameLevel->net_StartPlayDemo();
+		pApp->LoadEnd();
+
+		xr_free(demo_file);
+	}
+}
+
+static	CTimer	phase_timer;
+
+void CEngineApp::LoadBegin()
+{
+	ll_dwReference++;
+	if (1 == ll_dwReference) {
+
+		g_appLoaded = false;
+
+		phase_timer.Start();
+		load_stage = 0;
+	}
+}
+
+void CEngineApp::LoadEnd()
+{
+	ll_dwReference--;
+	if (0 == ll_dwReference) {
+		//Msg("* phase time: %d ms", phase_timer.GetElapsed_ms());
+		//Msg("* phase cmem: %d K", Memory.mem_usage() / 1024);
+		//Console->Execute("stat_memory");
+		g_appLoaded = true;
+		//		DUMP_PHASE;
+	}
+}
+
+void CEngineApp::SetLoadingScreen(ILoadingScreen* newScreen) {
+	if (GLoadingScreen) {
+		Log("! Trying to create new loading screen, but there is already one..");
+		DestroyLoadingScreen();
+	}
+
+	GLoadingScreen = newScreen;
+}
+
+void CEngineApp::DestroyLoadingScreen() { xr_delete(GLoadingScreen); }
+
+void CEngineApp::LoadDraw()
+{
+	if (g_appLoaded)				return;
+	Device.dwFrame += 1;
+
+
+	if (!Device.Begin())		return;
+
+	if (g_dedicated_server)
+		Console->OnRender();
+	else
+		load_draw_internal();
+
+	Device.End();
+}
+
+void CEngineApp::LoadForceFinish()
+{
+	if (GLoadingScreen)
+		GLoadingScreen->ForceFinish();
+}
+
+void CEngineApp::SetLoadStageTitle(const char* _ls_title)
+{
+	const static bool isLoadingStagesEnabled = EngineExternal()[EEngineExternalUI::ShowLoadingStages];
+	if (GLoadingScreen && isLoadingStagesEnabled)
+	{
+		GLoadingScreen->SetStageTitle(_ls_title);
+	}
+	
+	Log(_ls_title);
+}
+
+void CEngineApp::LoadTitleInt(const char* str1, const char* str2, const char* str3)
+{
+	if (GLoadingScreen)
+	{
+		GLoadingScreen->SetStageTip(str1, str2, str3);
+	}
+}
+
+void CEngineApp::LoadStage()
+{
+	VERIFY(ll_dwReference);
+
+	if (g_pGamePersistent->GameType() == 1 && !xr_strcmp(g_pGamePersistent->m_game_params.m_alife, "alife"))
+		max_load_stage = 17;
+	else
+		max_load_stage = 14;
+	LoadDraw();
+	++load_stage;
+}
+
+void CEngineApp::LoadSwitch()
+{
+}
+
+// Sequential
+void CEngineApp::OnFrame()
+{
+	g_pEventManager->Event.OnFrame();
+}
+
+void CEngineApp::Level_Append(const char* folder)
+{
+	string_path	N1, N2, N3, N4;
+	xr_strconcat(N1, folder, "level");
+	xr_strconcat(N2, folder, "level.ltx");
+	xr_strconcat(N3, folder, "level.geom");
+	xr_strconcat(N4, folder, "level.cform");
+	if (
+		FS.exist(_game_levels_, N1) &&
+		FS.exist(_game_levels_, N2) &&
+		FS.exist(_game_levels_, N3) &&
+		FS.exist(_game_levels_, N4)
+		)
+	{
+		sLevelInfo			LI;
+		LI.folder = xr_strdup(folder);
+		LI.name = 0;
+		Levels.push_back(LI);
+	}
+}
+
+void CEngineApp::Level_Scan()
+{
+	for (u32 i = 0; i < Levels.size(); i++)
+	{
+		xr_free(Levels[i].folder);
+		xr_free(Levels[i].name);
+	}
+	Levels.clear();
+
+
+	xr_vector<char*>* folder = FS.file_list_open(_game_levels_, FS_ListFolders | FS_RootOnly);
+	//.	R_ASSERT							(folder&&folder->size());
+
+	for (u32 i = 0; i < folder->size(); ++i)
+		Level_Append((*folder)[i]);
+
+	FS.file_list_close(folder);
+}
+
+void gen_logo_name(string_path& dest, const char* level_name, int num)
+{
+	xr_strconcat(dest, "intro\\intro_", level_name);
+
+	u32 len = xr_strlen(dest);
+	if (dest[len - 1] == Platform::kPreferredSeparator[0])
+		dest[len - 1] = 0;
+
+	string16 buff;
+	xr_strcat(dest, sizeof(dest), "_");
+	xr_strcat(dest, sizeof(dest), _itoa(num + 1, buff, 10));
+}
+
+void CEngineApp::Level_Set(u32 L)
+{
+	if (L >= Levels.size())	return;
+	FS.get_path("$level$")->_set(Levels[L].folder);
+
+	static string_path			path;
+
+	if (Level_Current != L)
+	{
+		path[0] = 0;
+
+		Level_Current = L;
+
+		int count = 0;
+		while (true)
+		{
+			string_path temp2;
+			gen_logo_name(path, Levels[L].folder, count);
+
+			if (FS.exist(temp2, _game_textures_, path, ".dds") || FS.exist(temp2, "$level$", path, ".dds")) 
+			{
+				count++;
+			} 
+			else 
+			{
+				string_path temp3;
+				xr_strconcat(path, "intro\\intro_", Levels[L].folder);
+				path[xr_strlen(path) - 1] = 0;
+
+				string_path nm;
+				xr_strconcat(nm, path, ".dds");
+				FS.update_path(temp3, _game_textures_, nm);
+				if (!FS.exist(temp3))
+				{
+					xr_strconcat(path, "intro\\intro_no_start_picture.dds");
+				}
+
+				break;
+			}
+		}
+
+		if (count)
+		{
+			int num = ::Random.randI(count);
+			gen_logo_name(path, Levels[L].folder, num);
+		}
+	}
+
+	if (path[0] && GLoadingScreen)
+		GLoadingScreen->SetLevelLogo(path);
+}
+
+int CEngineApp::Level_ID(const char* name, const char* ver, bool bSet)
+{
+	int result = -1;
+
+	bool arch_res = false;
+
+	for (CLocatorAPI::archive& Arch : FS.m_archives)
+	{
+		if (Arch.hSrcFile == 0)
+		{
+			const char* ln = Arch.header->r_string("header", "level_name");
+			const char* lv = Arch.header->r_string("header", "level_ver");
+
+			if (0 == _stricmp(ln, name) && 0 == _stricmp(lv, ver))
+			{
+				FS.LoadArchive(Arch);
+				arch_res = true;
+			}
+		}
+	}
+
+	if (arch_res)
+		Level_Scan();
+
+	string256 buffer;
+	xr_strconcat(buffer, name, Platform::kPreferredSeparator);
+	for (u32 I = 0; I < Levels.size(); ++I)
+	{
+		if (0 == _stricmp(buffer, Levels[I].folder))
+		{
+			result = int(I);
+			break;
+		}
+	}
+
+	if (bSet && result != -1)
+		Level_Set(result);
+
+	if (arch_res)
+		g_pGamePersistent->OnAssetsChanged();
+
+	return result;
+}
+
+CInifile* CEngineApp::GetArchiveHeader(const char* name, const char* ver)
+{
+	for (CLocatorAPI::archive& Arch : FS.m_archives)
+	{
+		if (!Arch.header)
+			break;
+
+		const char* ln = Arch.header->r_string("header", "level_name");
+		const char* lv = Arch.header->r_string("header", "level_ver");
+
+		if (0 == _stricmp(ln, name) && 0 == _stricmp(lv, ver))
+		{
+			return Arch.header;
+		}
+	}
+	return nullptr;
+}
+
+void CEngineApp::LoadAllArchives()
+{
+	if (FS.load_all_unloaded_archives())
+	{
+		Level_Scan();
+		g_pGamePersistent->OnAssetsChanged();
+	}
+}
+
+void CEngineApp::load_draw_internal()
+{
+	Device.m_pRender->SetupDefaultTarget();
+
+	if (GLoadingScreen)
+		GLoadingScreen->Update(load_stage, max_load_stage);
+	else
+		Device.m_pRender->ClearTarget();
+}

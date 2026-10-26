@@ -1,0 +1,398 @@
+#include "stdafx.h"
+
+#include "IGame_Level.h"
+#include "Feel_Vision.h"
+#include "Render.h"
+#include "xr_object.h"
+#include "xr_collide_form.h"
+#include "IGame_Level.h"
+#include "../xrCore/Collision/cl_intersect.h"
+
+using Feel::Vision;
+
+Vision::Vision(CObject* owner) :
+	pure_relcase(&Vision::feel_vision_relcase),
+	m_owner(owner)
+{
+}
+
+Vision::~Vision()
+{
+}
+
+struct SFeelParam {
+	Vision* parent;
+	Vision::feel_visible_Item* item;
+	float						vis;
+	float						vis_threshold;
+	SFeelParam(Vision* _parent, Vision::feel_visible_Item* _item, float _vis_threshold) :parent(_parent), item(_item), vis(1.f), vis_threshold(_vis_threshold) {}
+};
+
+void	Vision::o_new(CObject* O)
+{
+	feel_visible.push_back(feel_visible_Item());
+	feel_visible_Item& I = feel_visible.back();
+	I.O = O;
+	I.Cache_vis = 1.f;
+	I.Cache.verts[0].set(0, 0, 0);
+	I.Cache.verts[1].set(0, 0, 0);
+	I.Cache.verts[2].set(0, 0, 0);
+	I.fuzzy = -EPS_S;
+	I.cp_LP = O->get_new_local_point_on_mesh(I.bone_id);
+	I.cp_LAST = O->get_last_local_point_on_mesh(I.cp_LP, I.bone_id);
+}
+void	Vision::o_delete(CObject* O)
+{
+	xr_vector<feel_visible_Item>::iterator I = feel_visible.begin(), TE = feel_visible.end();
+	for (; I != TE; I++)
+		if (I->O == O) {
+			feel_visible.erase(I);
+			return;
+		}
+}
+
+void	Vision::feel_vision_clear()
+{
+	xrSRWLockGuard guard_query(&lock_query, false);
+	xrSRWLockGuard guard_visible(&lock_visible, false);
+	seen.clear();
+	AttentionObject = nullptr;
+	AttentionUntil = 0;
+	query.clear();
+	diff.clear();
+	feel_visible.clear();
+}
+
+void	Vision::feel_vision_relcase(CObject* object)
+{
+	xrSRWLockGuard guard_query(&lock_query, false);
+	xrSRWLockGuard guard_visible(&lock_visible, false);
+	if (AttentionObject == object) { AttentionObject = nullptr; AttentionUntil = 0; }
+	xr_vector<CObject*>::iterator Io;
+	Io = std::find(seen.begin(), seen.end(), object);
+	if (Io != seen.end())	seen.erase(Io);
+	Io = std::find(query.begin(), query.end(), object);
+	if (Io != query.end())query.erase(Io);
+	Io = std::find(diff.begin(), diff.end(), object);
+	if (Io != diff.end())	diff.erase(Io);
+	xr_vector<feel_visible_Item>::iterator Ii = feel_visible.begin(), IiE = feel_visible.end();
+	for (; Ii != IiE; ++Ii)if (Ii->O == object) { feel_visible.erase(Ii); break; }
+}
+
+void Vision::SetAttentionVisionObject(CObject* Object, u32 Until, float Angle, float Radius)
+{
+	xrSRWLockGuard Guard(&lock_query, false);
+	AttentionObject = Object;
+	AttentionUntil = Until;
+	AttentionAngle = Angle;
+	AttentionRadius = Radius;
+}
+
+void Vision::feel_vision_query(Fmatrix& mFull)
+{
+	xrSRWLockGuard guard(&lock_query, false);
+	Frustum.CreateFromMatrix(mFull, FRUSTUM_P_LRTB | FRUSTUM_P_FAR);
+
+	// Traverse object database
+	g_SpatialSpace->q_frustum
+	(
+		r_spatial,
+		0,
+		ESPATIAL_TYPE::VISIBLEFORAI,
+		Frustum
+	);
+
+	// Determine visibility for dynamic part of scene
+	seen.clear();
+
+	for (u32 o_it = 0; o_it < r_spatial.size(); o_it++)
+	{
+		ISpatial* spatial = r_spatial[o_it].get();
+		CObject* object = spatial->dcast_CObject();
+		if (object && feel_vision_isRelevant(object))
+			seen.push_back(object);
+	}
+	// A noticed candidate is traced by the normal visibility pipeline alongside the primary frustum.
+	// It cannot replace the primary candidates or directly create enemy knowledge.
+	if (AttentionObject && s32(AttentionUntil - Device.dwTimeGlobal) > 0 && !AttentionObject->getDestroy() && feel_vision_isRelevant(AttentionObject))
+	{
+		Fvector Offset;
+		Offset.sub(AttentionObject->Center(), m_owner->Center());
+		const float Distance = Offset.magnitude();
+		if (Distance <= AttentionRadius && (AttentionAngle >= 360.f || Distance <= EPS_L ||
+			Offset.dotproduct(m_owner->XFORM().k) >= Distance * cosf(deg2rad(AttentionAngle * .5f))))
+		{
+			seen.push_back(AttentionObject);
+		}
+	}
+	else
+	{
+		AttentionObject = nullptr;
+		AttentionUntil = 0;
+	}
+	if (seen.size() > 1)
+	{
+		std::sort(seen.begin(), seen.end());
+		xr_vector<CObject*>::iterator end = std::unique(seen.begin(), seen.end());
+		if (end != seen.end()) seen.erase(end, seen.end());
+	}
+}
+
+void	Vision::feel_vision_update(Fvector& P, float dt, float vis_threshold)
+{
+	PROF_EVENT("feel_vision_update");
+	{
+		xrSRWLockGuard guard_q(&lock_query, false);
+		xrSRWLockGuard guard_v(&lock_visible, false);
+		// B-A = objects, that become visible
+		if (!seen.empty())
+		{
+			xr_vector<CObject*>::iterator E = std::remove(seen.begin(), seen.end(), m_owner);
+			seen.resize(E - seen.begin());
+
+			{
+				diff.resize(std::max(seen.size(), query.size()));
+				xr_vector<CObject*>::iterator	E_ = std::set_difference(
+					seen.begin(), seen.end(),
+					query.begin(), query.end(),
+					diff.begin());
+				diff.resize(E_ - diff.begin());
+				for (u32 i = 0; i < diff.size(); i++)
+					o_new(diff[i]);
+			}
+		}
+
+		// A-B = objects, that are invisible
+		if (!query.empty())
+		{
+			diff.resize(std::max(seen.size(), query.size()));
+			xr_vector<CObject*>::iterator	E = std::set_difference(
+				query.begin(), query.end(),
+				seen.begin(), seen.end(),
+				diff.begin());
+			diff.resize(E - diff.begin());
+			for (u32 i = 0; i < diff.size(); i++)
+				o_delete(diff[i]);
+		}
+
+		// Copy results and perform traces
+		query = seen;
+	}
+	o_trace(P, dt, vis_threshold);
+}
+void Vision::o_trace(Fvector& P, float dt, float vis_threshold) {
+	RQR.r_clear();
+	xrSRWLockGuard guard(&lock_visible, false);
+	xr_vector<feel_visible_Item>::iterator I = feel_visible.begin(), E = feel_visible.end();
+	for (; I != E; I++) {
+		I->OwnTraceVisible = false;
+		if (0 == I->O->CFORM()) { I->fuzzy = -1; continue; }
+
+		// verify relation
+//			if (positive(I->fuzzy) && I->O->Position().similar(I->cp_LR_dst,lr_granularity) && P.similar(I->cp_LR_src,lr_granularity))
+//				continue;
+
+		I->cp_LR_dst = I->O->Position();
+		I->cp_LR_src = P;
+		I->cp_LAST = I->O->get_last_local_point_on_mesh(I->cp_LP, I->bone_id);
+
+		// 
+		Fvector				D, OP = I->cp_LAST;
+		D.sub(OP, P);
+		if (fis_zero(D.magnitude())) {
+			I->fuzzy = 1.f;
+			I->OwnTraceVisible = true;
+			I->OwnExposureMilliseconds += std::min(std::max(dt, 0.f), .1f) * 1000.f;
+			I->OwnObservationTime = Device.dwTimeGlobal;
+			I->OwnObservationPosition = I->cp_LR_dst;
+			continue;
+		}
+
+		float				f = D.magnitude() + .2f;
+		if (f > fuzzy_guaranteed) {
+			D.div(f);
+			// setup ray defs & feel params
+			collide::ray_defs RD(P, D, f, CDB::OPT_CULL, collide::rq_target(collide::rqtStatic |/**/collide::rqtObject |/**/collide::rqtObstacle));
+			SFeelParam	feel_params(this, &*I, vis_threshold);
+			// check cache
+			if (I->Cache.result && I->Cache.similar(P, D, f)) {
+				// similar with previous query
+				feel_params.vis = I->Cache_vis;
+				//					Log("cache 0");
+			}
+			else {
+				float _u, _v, _range;
+				if (CDB::TestRayTri(P, D, I->Cache.verts, _u, _v, _range, false) && (_range > 0 && _range < f)) {
+					feel_params.vis = 0.f;
+					//						Log("cache 1");
+				}
+				else
+				{
+					// cache outdated. real query.
+					VERIFY(!fis_zero(RD.dir.magnitude()));
+
+					if (g_pGameLevel->ObjectSpace.RayQuery(RQR, RD, [](collide::rq_result & result, LPVOID params) -> bool
+					{
+						SFeelParam* fp = (SFeelParam*)params;
+						float vis = fp->parent->feel_vision_mtl_transp(result.O, result.element);
+						fp->vis *= vis;
+						if (nullptr == result.O && fis_zero(vis))
+						{
+							auto& Tidxs = g_pGameLevel->ObjectSpace.GetStaticTris()[result.element].verts;
+							xr_vector<Fvector>& V = g_pGameLevel->ObjectSpace.GetStaticVerts();
+							fp->item->Cache.verts[0] = V[Tidxs[0]];
+							fp->item->Cache.verts[1] = V[Tidxs[1]];
+							fp->item->Cache.verts[2] = V[Tidxs[2]];
+						}
+						return bool(fp->vis > fp->vis_threshold);
+					}, &feel_params, nullptr, m_owner))
+
+					{
+						I->Cache_vis = feel_params.vis;
+						I->Cache.set(P, D, f, true);
+					}
+					else {
+						//							feel_params.vis	= 0.f;
+						//							I->Cache_vis	= feel_params.vis	;
+						I->Cache.set(P, D, f, false);
+					}
+					//						Log("query");
+				}
+			}
+			//				Log("Vis",feel_params.vis);
+			g_SpatialSpace->q_ray(r_spatial, 0, ESPATIAL_TYPE::VISIBLEFORAI, P, D, f);
+
+			RD.flags = CDB::OPT_ONLYFIRST;
+
+			bool collision_found = false;
+
+			for (ISpatialShared& Ptr : r_spatial)
+			{
+				CObject const* object = Ptr->dcast_CObject();
+
+				if (object == m_owner)
+					continue;
+
+				if (object == I->O)
+					continue;
+
+				RQR.r_clear();
+				if (object && object->collidable.model && !object->collidable.model->_RayQuery(RD, RQR))
+					continue;
+
+				collision_found = true;
+				break;
+			}
+
+			if (collision_found)
+				feel_params.vis = 0.f;
+
+			if (feel_params.vis < feel_params.vis_threshold) {
+				// INVISIBLE, choose next point
+				I->fuzzy -= fuzzy_update_novis * dt;
+				clamp(I->fuzzy, -.5f, 1.f);
+				I->cp_LP = I->O->get_new_local_point_on_mesh(I->bone_id);
+			}
+			else {
+				// VISIBLE
+				I->OwnTraceVisible = true;
+				I->OwnExposureMilliseconds += std::min(std::max(dt, 0.f), .1f) * 1000.f;
+				I->OwnObservationTime = Device.dwTimeGlobal;
+				I->OwnObservationPosition = I->cp_LR_dst;
+				I->fuzzy += fuzzy_update_vis * dt;
+				clamp(I->fuzzy, -.5f, 1.f);
+			}
+		}
+		else {
+			// Keep native guaranteed-near visibility, but do not treat a wall as an own observation.
+			const float NearDistance = D.magnitude();
+			Fvector NearDirection = D;
+			NearDirection.div(NearDistance);
+			I->OwnTraceVisible = !g_pGameLevel->ObjectSpace.RayTest(P, NearDirection, NearDistance, collide::rqtStatic, nullptr, nullptr);
+			if (I->OwnTraceVisible)
+			{
+				I->OwnExposureMilliseconds += std::min(std::max(dt, 0.f), .1f) * 1000.f;
+				I->OwnObservationTime = Device.dwTimeGlobal;
+				I->OwnObservationPosition = I->cp_LR_dst;
+			}
+			I->fuzzy += fuzzy_update_vis * dt;
+			clamp(I->fuzzy, -.5f, 1.f);
+		}
+	}
+}
+
+void Vision::GetOwnVisibleObjects(xr_vector<CObject*>& Objects)
+{
+	Objects.clear();
+	xrSRWLockGuard Guard(&lock_visible, true);
+	Objects.reserve(feel_visible.size());
+	for (const feel_visible_Item& Item : feel_visible)
+	{
+		if (Item.O && !Item.O->getDestroy() && Item.OwnTraceVisible && positive(Item.fuzzy))
+		{
+			Objects.push_back(Item.O);
+		}
+	}
+}
+
+bool Vision::GetOwnVisionObservation(const CObject* Object, Fvector& Position, u32& Time)
+{
+	xrSRWLockGuard Guard(&lock_visible, true);
+	for (const feel_visible_Item& Item : feel_visible)
+	{
+		if (Item.O == Object && Item.OwnTraceVisible && positive(Item.fuzzy))
+		{
+			Position = Item.OwnObservationPosition;
+			Time = Item.OwnObservationTime;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool Vision::GetOwnVisionExposure(const CObject* Object, float& Milliseconds)
+{
+	xrSRWLockGuard Guard(&lock_visible, true);
+	for (const feel_visible_Item& Item : feel_visible)
+	{
+		if (Item.O == Object)
+		{
+			Milliseconds = Item.OwnExposureMilliseconds;
+			return true;
+		}
+	}
+	return false;
+}
+
+void Vision::feel_vision_get(xr_vector<CObject*>& R)
+{
+	PROF_EVENT("feel_vision_get");
+	R.clear();
+	xrSRWLockGuard guard(&lock_visible, true);
+	R.reserve(feel_visible.size());
+	for (const feel_visible_Item& item : feel_visible)
+	{
+		if (item.O && !item.O->getDestroy() && positive(item.fuzzy))
+			R.push_back(item.O);
+	}
+}
+
+Fvector Vision::feel_vision_get_vispoint(CObject* _O)
+{
+	static Fvector feel_zero_point = { 0.f, 0.f, 0.f };
+	if (!_O || _O->getDestroy() || feel_visible.empty())
+		return feel_zero_point;
+
+	xrSRWLockGuard guard(&lock_visible, true);
+	auto it = std::find_if(feel_visible.begin(), feel_visible.end(),
+		[_O](const feel_visible_Item& item) {
+			return _O == item.O && positive(item.fuzzy);
+		});
+
+	if (it != feel_visible.end())
+	{
+		return it->cp_LAST;
+	}
+
+	return feel_zero_point;
+}

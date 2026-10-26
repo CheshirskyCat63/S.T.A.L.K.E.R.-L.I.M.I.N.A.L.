@@ -1,0 +1,19 @@
+#ifndef FontRender_included
+#define FontRender_included
+#pragma once
+
+class CGameFont;
+
+class IFontRender
+{
+public:
+	virtual ~IFontRender() {;}
+
+	virtual void Initialize(const char* cShader, const char* cTexture) = 0;
+	virtual void OnRender(CGameFont &owner) = 0;
+
+	virtual void CreateFontAtlas(u32 width, u32 height, const char* name, void* bitmap) = 0;
+	virtual bool GetAtlasTexSize(u32& outW, u32& outH) const { return false; }
+};
+
+#endif	//	FontRender_included

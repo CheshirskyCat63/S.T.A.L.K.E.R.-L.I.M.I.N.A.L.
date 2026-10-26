@@ -1,0 +1,23 @@
+#pragma once
+
+#include "../../xrUI/Widgets/UIWindow.h"
+#include "../../xrScripts/script_export_space.h"
+
+class CUIScrollView;
+
+class CUIMapInfo final : public CUIWindow
+{
+public:
+				CUIMapInfo			();
+				~CUIMapInfo			();
+			void InitMapInfo		(Fvector2 pos,Fvector2 size);
+			void InitMap			(const char* map_name, const char* map_ver);
+		const char*	 GetLargeDesc		();
+
+	virtual CUIWindow* ui_cast_window() { return this; }
+
+	DECLARE_SCRIPT_REGISTER_FUNCTION
+protected:
+	CUIScrollView*	m_view;
+	shared_str		m_large_desc;
+};

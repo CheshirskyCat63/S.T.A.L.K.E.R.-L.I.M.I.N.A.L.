@@ -1,0 +1,504 @@
+////////////////////////////////////////////////////////////////////////////
+//	Module 		: inventory_item.h
+//	Created 	: 24.03.2003
+//  Modified 	: 29.01.2004
+//	Author		: Victor Reutsky, Yuri Dobronravin
+//	Description : Inventory item
+////////////////////////////////////////////////////////////////////////////
+
+#pragma once
+
+#include "inventory_space.h"
+#include "Descs/InventoryItemDesc.h"
+#include "hit_immunity.h"
+#include "attachable_item.h"
+#include "xrServer_Objects_ALife.h"
+#include "xrServer_Objects_ALife_Items.h"
+#include "../xrScripts/script_export_space.h"
+#include "item_attachment.h"
+
+class IRepackerInterface;
+
+enum EHandDependence {
+	hdNone = 0,
+	hd1Hand = 1,
+	hd2Hand = 2
+};
+
+class CSE_Abstract;
+class CGameObject;
+class CFoodItem;
+class CMissile;
+class CHudItem;
+class CWeaponAmmo;
+class CWeapon;
+class CPhysicsShellHolder;
+class NET_Packet;
+class CEatableItem;
+class CArtefact;
+class CCustomOutfit;
+class CHelmet;
+class CCustomDetector;
+class CCustomDevice;
+class CWeaponMagazined;
+class CWeaponMagazinedWGrenade;
+class CWeaponBinoculars;
+class CWeaponKnife;
+class CWeaponBM16;
+class CWeaponRPG7;
+class CWeaponRG6;
+class CTorch;
+class CBolt;
+class CPda;
+class CGrenade;
+class CSilencer;
+class CScope;
+class CGrenadeLauncher;
+class CArmorBase;
+struct SPHNetState;
+struct net_update_IItem;
+
+class CInventoryOwner;
+
+struct SHit;
+
+class CSE_ALifeInventoryItem;
+using mask_inv_num_items = CSE_ALifeInventoryItem::mask_num_items;
+
+struct net_update_IItem
+{
+	u32	dwTimeStamp = 0;
+	SPHNetState	State = {};
+};
+
+struct net_updateInvData
+{
+	xr_deque<net_update_IItem> NET_IItem = {};
+	u32	m_dwIStartTime = 0;
+	u32 m_dwIEndTime = 0;
+};
+
+
+class CInventoryItem : 
+	public CAttachableItem,
+	public CHitImmunity, 
+	public item_attachments_manager
+#ifdef DEBUG_DRAW
+	, public pureRender
+#endif
+{
+private:
+	using inherited = CAttachableItem;
+	friend class CScriptGameObject;
+protected:
+	enum EIIFlags {
+		FdropManual = (1 << 0),
+		FCanTake = (1 << 1),
+		FCanTrade = (1 << 2),
+		Fbelt = (1 << 3),
+		Fruck = (1 << 4),
+		FRuckDefault = (1 << 5),
+		FUsingCondition = (1 << 6),
+		FAllowSprint = (1 << 7),
+		Fuseful_for_NPC = (1 << 8),
+		FInInterpolation = (1 << 9),
+		FInInterpolate = (1 << 10),
+		FIsQuestItem = (1 << 11),
+		FIsHelperItem = (1 << 12),
+		FCanStack = (1 << 13),
+	};
+
+	Flags16	m_flags;
+public:
+	CInventoryItem();
+	virtual	~CInventoryItem();
+
+public:
+	virtual void Load(const char* section);
+	void ReadCustomTextAndMarks(const char* section);
+	void Read3dStaticsData(const char* section);
+	void RefreshTranslations();
+
+	// Дополнение названия предмета для кастомизации через скрипты к основному имени в UIItemInfo.cpp
+	void SetAdditionalName(const char* text);
+	void SetPrependName(const char* text);
+	void BuildName();
+
+	// Дополнение описания предмета для кастомизации через скрипты к основному описанию в UIItemInfo.cpp
+	void SetAdditionalDescription(const char* additionalDescription);
+	void SetPrependDescription(const char* text);
+	void BuildDescription();
+
+	bool IsDrawCost() { return m_draw_cost; }
+
+	bool IsUsedAdditionalName() const { return m_IsUsedAdditionalName; }
+	bool IsUsedPrependName() const { return m_IsUsedPrependName; }
+
+	bool IsUsedAdditionalDescription() const { return m_IsUsedAdditionalDescription; }
+	bool IsUsedPrependDescription() const { return m_IsUsedPrependDescription; }
+
+	const char* GetAdditionalName() const { return m_AdditionalName.c_str(); }
+	const char* GetPrependName() const { return m_PrependName.c_str(); }
+
+	const char* GetAdditionalDescription() const { return m_AdditionalDescription.c_str(); }
+	const char* GetPrependDescription() const { return m_PrependDescription.c_str(); }
+
+	shared_str GetExtendedUnionName() const { return m_ExtendedUnionName; }
+	shared_str GetExtendedUnionDescription() const { return m_ExtendedUnionDescription; }
+
+
+	const char* NameItem() const { return m_name.c_str(); }
+	const char* NameShort() const { return m_nameShort.c_str(); }
+	shared_str ItemDescription() const { return m_Description; }
+	shared_str ItemDescriptionAdditional() const { return m_AdditionalDescription; }
+	virtual bool GetBriefInfo(II_BriefInfo& info) { info.clear(); return false; }
+
+	virtual void OnEvent(NET_Packet& P, u16 type);
+
+	virtual bool Useful() const { return CanTake(); }
+	virtual bool IsUsingCondition() const { return m_flags.test(FUsingCondition); }
+	virtual bool CanStack() const { return (m_flags.test(FCanStack)); };
+
+	virtual bool Attach(PIItem pIItem);
+	virtual bool Detach(PIItem pIItem);
+	virtual bool CanAttach(PIItem pIItem)
+	{
+		auto attachment = get_attachment(pIItem->m_section_id);
+		return attachment && !attachment->state.test(eAStatePermanent);
+	}
+	virtual bool CanDetach(PIItem pIItem) { return GetChildByID(pIItem->object().ID()); }
+
+	virtual EHandDependence HandDependence()	const { return hd1Hand; };
+	virtual bool IsSingleHanded()	const { return true; };
+	virtual bool ActivateItem() { return false; }
+	virtual void DeactivateItem() {}
+	virtual bool Action(u16 cmd, u32 flags) { return false; }	// true если известная команда, иначе false
+	virtual void DiscardState() {};
+
+	virtual void OnH_B_Chield();
+	virtual void OnH_A_Chield();
+	virtual void OnH_B_Independent(bool just_before_destroy);
+	virtual void OnH_A_Independent();
+
+	virtual void save(NET_Packet& output_packet);
+	virtual void load(IReader& input_packet);
+	virtual void Serialize(ISaveObject& Object);
+	virtual bool net_SaveRelevant() { return true; }
+	void SetDrawCost(bool state) { m_draw_cost = state; }
+	virtual void render_item_ui() {}; //when in slot & query return true
+	virtual bool render_item_ui_query() { return false; }; //when in slot
+
+	virtual void UpdateCL();
+
+	virtual	void Hit(SHit* pHDS);
+
+	bool GetDropManual() const { return m_flags.test(FdropManual); }
+	void SetDropManual(bool val);
+
+	bool IsInvalid() const;
+
+	bool IsQuestItem() const { return m_flags.test(FIsQuestItem); }
+	virtual	u32 Cost() const { return m_cost; }
+	void setCost(u32 nValue);
+
+	virtual float Weight() const { return m_weight; }
+	void setWeight(float value);
+
+	Fvector Get3DStaticRotate() const
+	{
+		return m_3d_static_rotate;
+	}
+
+	xr_hash_map<u32, CGameObject*> m_children_storage;
+
+	ICF void append_child(u32 id, CGameObject* O)
+	{
+		m_children_storage.insert({id, O});
+		item_attachments_manager::enable_attachment(O->cNameSect());
+	}
+
+	ICF void erase_child(u32 id)
+	{
+		if (m_children_storage.find(id) != m_children_storage.end())
+		{
+			item_attachments_manager::disable_attachment(m_children_storage[id]->cNameSect());
+			m_children_storage.erase(id);
+		}
+	}
+
+	CGameObject* GetChildBySectName(shared_str child_sect_name) const;
+
+	CGameObject* GetChildByName(shared_str child_name) const;
+
+	CGameObject* GetChildByID(u32 child_id) const;
+
+	const item_attachment* GetRealattachment(shared_str child_sect_name, EattachmentType type = eTypeNone) const;
+
+public:
+	bool m_draw_cost = true;
+	CInventory* m_pInventory = nullptr;
+	shared_str m_section_id;
+	shared_str m_name;
+	shared_str m_nameShort;
+	shared_str m_nameComplex;
+	shared_str m_custom_text;
+	Fvector2 m_custom_text_offset;
+	CGameFont* m_custom_text_font = nullptr;
+	u32 m_custom_text_clr_inv = 0;
+	u32	m_last_dropped_owner_id = 65535;
+	// Used on next Take() to restore sidearm to holster after kG drop (see CInventory::Take / DropItem).
+	u16 m_preferredSlotAfterPickup = 0xffff;
+
+	using EInvCellAnchor = ::EInvCellAnchor;
+	using SParseItem = SInventoryParseItem;
+
+	const SInventoryItemDesc& ItemDesc() const { VERIFY(CurrentItemDesc); return *CurrentItemDesc; }
+
+	static EInvCellAnchor ParseInvCellAnchor(const char* value);
+
+	bool m_custom_mark = false;
+	shared_str m_custom_mark_texture;
+	Fvector2 m_custom_mark_offset;
+	Fvector2 m_custom_mark_size;
+	u32 m_custom_mark_clr = 0;
+	const char* m_custom_mark_lanim = {};
+	float ScaleIcon = 1.0f;
+	shared_str IconsTexture;
+
+	Fvector m_3d_static_rotate{};
+	float m_3d_static_scale = 1.f;
+	Fvector2 IconOffset{};
+	const char* m_3d_static_visual_name = "";
+
+	SInvItemPlace m_ItemCurrPlace = {};
+	RStringVec m_HiglightRelatedItemSections = {}; // FFx0001 ++
+
+
+	virtual void OnMoveToSlot(const SInvItemPlace& prev) {};
+	virtual void OnMoveToBelt(const SInvItemPlace& prev) {};
+	virtual void OnMoveToRuck(const SInvItemPlace& prev) {};
+
+	Irect GetInvGridRect() const;
+	void SetInvGridRect(const Irect& rect);
+	void SetInvGridRect(u32 x, u32 y, u32 w, u32 h);
+	Irect GetUpgrIconRect() const;
+	const shared_str& GetIconName() const { return ItemDesc().m_icon_name; };
+	Frect GetKillMsgRect() const;
+	//---------------------------------------------------------------------
+	IC float GetCondition() const { return m_fCondition; }
+	virtual	float GetConditionToShow() const { return GetCondition(); }
+	IC void	SetCondition(float val) { m_fCondition = val; }
+	void	ChangeCondition(float fDeltaCondition);
+
+	u16 BaseSlot()  const { return m_ItemCurrPlace.base_slot_id; }
+	u16 CurrSlot()  const { return m_ItemCurrPlace.slot_id; }
+	u16 CurrPlace()  const { return m_ItemCurrPlace.type; }
+
+	IC void SetPreferredSlotAfterPickup(u16 slotId) { m_preferredSlotAfterPickup = slotId; }
+	IC void ClearPreferredSlotAfterPickup() { m_preferredSlotAfterPickup = 0xffff; }
+	IC bool HasPreferredSlotAfterPickup() const { return m_preferredSlotAfterPickup != 0xffff; }
+	IC u16 PreferredSlotAfterPickup() const { return m_preferredSlotAfterPickup; }
+
+	bool Belt() { return !!m_flags.test(Fbelt); }
+	void Belt(bool on_belt) { m_flags.set(Fbelt, on_belt); }
+	bool Ruck() { return !!m_flags.test(Fruck); }
+	void Ruck(bool on_ruck) { m_flags.set(Fruck, on_ruck); }
+	bool RuckDefault() { return !!m_flags.test(FRuckDefault); }
+
+	virtual bool CanTake() const { return !!m_flags.test(FCanTake); }
+	virtual void SetCanTake(bool state) { m_flags.set(FCanTake, state); }
+	bool CanTrade() const;
+	void AllowTrade() { m_flags.set(FCanTrade, ItemDesc().m_can_trade); };
+	void DenyTrade() { m_flags.set(FCanTrade, false); };
+
+	virtual bool IsNecessaryItem(CInventoryItem* item);
+	virtual bool IsNecessaryItem(const shared_str& item_sect) { return false; };
+protected:
+	u32 m_cost = 0;
+	float m_weight = 0.0f;
+	float m_fCondition = 1.0f;
+
+	shared_str m_Description;
+
+	shared_str m_ExtendedUnionName;
+	shared_str m_ExtendedUnionDescription;
+
+	shared_str m_AdditionalName;
+	bool m_IsUsedAdditionalName = false;
+
+	shared_str m_AdditionalDescription;
+	bool m_IsUsedAdditionalDescription = false;
+
+	shared_str m_PrependName;
+	bool m_IsUsedPrependName = false;
+
+	shared_str m_PrependDescription;
+	bool m_IsUsedPrependDescription = false;
+
+protected:
+	ALife::_TIME_ID m_dwItemIndependencyTime;
+
+	float m_fControlInertionFactor = 0.0f;
+
+public:
+	virtual void make_Interpolation() {};
+	virtual void PH_B_CrPr(); // actions & operations before physic correction-prediction steps
+	virtual void PH_I_CrPr(); // actions & operations after correction before prediction steps
+#ifdef DEBUG
+	virtual void PH_Ch_CrPr(); // 
+#endif
+	virtual void PH_A_CrPr(); // actions & operations after phisic correction-prediction steps
+
+	virtual void net_Import(NET_Packet& P);					// import from server
+	virtual void net_Export(NET_Packet& P);					// export to server
+
+public:
+	virtual void activate_physic_shell();
+	virtual bool has_network_synchronization() const;
+
+	virtual bool NeedToDestroyObject() const;
+	virtual ALife::_TIME_ID	TimePassedAfterIndependant() const;
+
+	virtual	bool IsSprintAllowed() const { return !!m_flags.test(FAllowSprint); };
+
+	virtual	float GetControlInertionFactor() const { return m_fControlInertionFactor; };
+	void setControlInertionFactor(float value);
+
+	virtual void UpdateXForm();
+
+protected:
+	net_updateInvData* m_net_updateData = nullptr;
+	net_updateInvData* NetSync();
+	void CalculateInterpolationParams();
+
+public:
+	virtual bool net_Spawn(CSE_Abstract* DC);
+	virtual void net_Destroy();
+	virtual void reload(const char* section);
+	virtual void reinit();
+	virtual bool can_kill() const;
+	virtual CInventoryItem* can_kill(CInventory* inventory) const;
+	virtual const CInventoryItem* can_kill(const xr_vector<const CGameObject*>& items) const;
+	virtual CInventoryItem* can_make_killing(const CInventory* inventory) const;
+	virtual bool ready_to_kill() const;
+	IC bool useful_for_NPC() const;
+#ifdef DEBUG_DRAW
+	virtual void OnRender();
+#endif
+
+	virtual void renderable_Render();
+
+public:
+	virtual DLL_Pure* _construct();
+	IC CPhysicsShellHolder& object() const { VERIFY(m_object); return (*m_object); }
+	ALife::_OBJECT_ID object_id() const;
+	ALife::_OBJECT_ID parent_id() const;
+	virtual void on_activate_physic_shell() { R_ASSERT2(0, "failed call of virtual function!"); }
+
+protected:
+	const SInventoryItemDesc* CurrentItemDesc = nullptr;
+public:
+	virtual	void modify_holder_params(float& range, float& fov) const;
+
+protected:
+	IC	CInventoryOwner& inventory_owner() const;
+
+private:
+	CPhysicsShellHolder* m_object = nullptr;
+	Irect m_inv_rect;
+
+public:
+	virtual CInventoryItem* cast_inventory_item() { return this; }
+	virtual CAttachableItem* cast_attachable_item() { return this; }
+	virtual CPhysicsShellHolder* cast_physics_shell_holder() { return nullptr; }
+	virtual CEatableItem* cast_eatable_item() { return nullptr; }
+	virtual CWeapon* cast_weapon() { return nullptr; }
+	virtual CFoodItem* cast_food_item() { return nullptr; }
+	virtual CMissile* cast_missile() { return nullptr; }
+	virtual CHudItem* cast_hud_item() { return nullptr; }
+	virtual CWeaponAmmo* cast_weapon_ammo() { return nullptr; }
+	virtual CGameObject* cast_game_object() { return nullptr; }
+	virtual CArtefact* cast_artefact() { return nullptr; }
+	virtual CCustomOutfit* cast_outfit() { return nullptr; }
+	virtual CHelmet* cast_helmet() { return nullptr; }
+	virtual CArmorBase* cast_armorbase() { return nullptr; }
+	virtual CCustomDetector* cast_custom_detector() { return nullptr; }
+	virtual CCustomDevice* cast_custom_device() { return nullptr; }
+	virtual CWeaponBinoculars* cast_weapon_binoculars() { return nullptr; }
+	virtual CWeaponKnife* cast_weapon_knife() { return nullptr; }
+	virtual CWeaponMagazined* cast_weapon_magazined() { return nullptr; }
+	virtual CWeaponMagazinedWGrenade* cast_weapon_magazined_w_grenade() { return nullptr; }
+	virtual CWeaponBM16* cast_weapon_bm16() { return nullptr; }
+	virtual CTorch* cast_torch() { return nullptr; }
+	virtual CWeaponRPG7* cast_weapon_rpg7() { return nullptr; }
+	virtual CWeaponRG6* cast_weapon_rg6() { return nullptr; }
+	virtual CBolt* cast_bolt() { return nullptr; }
+	virtual CPda* cast_pda() { return nullptr; }
+	virtual CGrenade* cast_grenade() { return nullptr; }
+	virtual CSilencer* cast_addon_silencer() { return nullptr; }
+	virtual CScope* cast_addon_scope() { return nullptr; }
+	virtual CGrenadeLauncher* cast_addon_grenade_launcher() { return nullptr; }
+	virtual CPhysicItem* cast_physics_item() { return nullptr; }
+	virtual CBackpack* cast_backpack() { return nullptr; }
+	virtual CWeaponShotgun* cast_weapon_shotgun() { return nullptr; }
+	virtual IRepackerInterface* cast_repacker_interface() {return nullptr;}
+
+	////////// upgrades //////////////////////////////////////////////////
+public:
+	using Upgrades_type = xr_vector<shared_str>;
+
+protected:
+	Upgrades_type m_upgrades = {};
+
+public:
+	IC bool	has_any_upgrades() { return (m_upgrades.size() != 0); }
+	bool has_upgrade(const shared_str& upgrade_id);
+	bool has_upgrade_group(const shared_str& upgrade_group_id);
+	void add_upgrade(const shared_str& upgrade_id, bool loading);
+	bool get_upgrades_str(string2048& res) const;
+	Upgrades_type get_upgrades() { return m_upgrades; }	//Alundaio
+
+	bool equal_upgrades(Upgrades_type const& other_upgrades) const;
+
+	bool verify_upgrade(const char* section);
+	bool install_upgrade(const char* section);
+	void pre_install_upgrade();
+
+#ifdef DEBUG	
+	void log_upgrades();
+#endif // DEBUG
+
+	IC Upgrades_type const& upgardes() const;
+	virtual void Interpolate();
+	float interpolate_states(net_update_IItem const& first, net_update_IItem const& last, SPHNetState& current);
+
+protected:
+	virtual	void net_Spawn_install_upgrades(Upgrades_type saved_upgrades);
+	virtual bool install_upgrade_impl(const char* section, bool test);
+
+	template <XRay::Concepts::Arithmetic T>
+	IC static bool process_if_exists(const char* section, const char* name, T& value, bool test);
+
+	template <XRay::Concepts::Arithmetic T>
+	IC static bool process_if_exists_set(const char* section, const char* name, T& value, bool test);
+
+	IC static bool process_if_exists_set(const char* section, const char* name, shared_str& value, bool test);
+	IC static bool process_if_exists_set(const char* section, const char* name, const char*& value, bool test);
+	IC static bool process_if_exists_set(const char* section, const char* name, xr_string& value, bool test);
+
+	template <XRay::Concepts::FloatPoint T>
+	IC static bool process_if_exists_deg2rad(const char* section, const char* name, T& value, bool test);
+
+	void net_Export_PH_Params(NET_Packet& P, SPHNetState& State, mask_inv_num_items& num_items);
+	void net_Import_PH_Params(NET_Packet& P, net_update_IItem& N, mask_inv_num_items& num_items);
+
+	bool m_just_after_spawn = true;
+	bool m_activated = false;
+
+public:
+	IC bool	is_helper_item() { return !!m_flags.test(FIsHelperItem); }
+	IC void	set_is_helper(bool is_helper) { m_flags.set(FIsHelperItem, is_helper); }
+	DECLARE_SCRIPT_REGISTER_FUNCTION
+}; // class CInventoryItem
+
+#include "inventory_item_inline.h"

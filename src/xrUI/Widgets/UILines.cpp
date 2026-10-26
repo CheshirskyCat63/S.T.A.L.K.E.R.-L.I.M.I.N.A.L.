@@ -1,0 +1,792 @@
+// File:		UILines.cpp
+// Description:	Multi-line Text Control
+// Created:		12.03.2005
+// Author:		Serge Vynnycheko
+// Mail:		narrator@gsc-game.kiev.ua
+//
+// Copyright 2005 GSC Game World
+
+#include "stdafx.h"
+#include "UITextureMaster.h"
+#include "UILines.h"
+#include "UIXmlInit.h"
+#include "uilinestd.h"
+#include "../../xrEngine/string_table.h"
+#include "UIFontDefines.h"
+
+
+CUILines::CUILines()
+{
+	m_pFont							= nullptr;
+	m_eTextAlign					= CGameFont::alLeft;
+	m_eVTextAlign					= valTop;
+	m_dwTextColor					= 0xffffffff;
+	m_dwTextGradientColor			= 0xff888888;
+	m_TextOffset.set				(0.0f,0.0f);
+	m_text							= "";
+	m_text_src						= "";
+	uFlags.zero();
+	uFlags.set(flNeedReparse,		false);
+	uFlags.set(flComplexMode,		false);
+	uFlags.set(flPasswordMode,		false);
+	uFlags.set(flColoringMode,		true);
+	uFlags.set(flCutWordsMode,		false);
+	uFlags.set(flRecognizeNewLine,	true);
+	m_eTextGradientMode				= CGameFont::gm_vert;
+
+	m_wndSize						= {0, 0};
+	m_wndPos						= {0, 0};
+	m_textShadow					= {};
+}
+
+CUILines::~CUILines()
+{
+
+}
+
+void CUILines::SetTextComplexMode(bool mode)
+{
+	uFlags.set(flComplexMode, mode);
+	if (mode)
+	{
+		uFlags.set(flPasswordMode, false);
+	}
+}
+
+void CUILines::SetPasswordMode(bool mode)
+{
+	uFlags.set(flPasswordMode, mode);
+	if (mode)
+	{
+		uFlags.set(flComplexMode, false);
+	}
+}
+
+
+void CUILines::SetColoringMode(bool mode)
+{
+	uFlags.set(flColoringMode, mode);
+}
+
+void CUILines::SetCutWordsMode(bool mode)
+{
+	uFlags.set(flCutWordsMode, mode);
+}
+
+void CUILines::SetEllipsis(bool mode)
+{
+	uFlags.set(flEllipsis, mode);	
+}
+
+void CUILines::SetUseNewLineMode(bool mode)
+{
+	uFlags.set(flRecognizeNewLine, mode);	
+}
+
+void CUILines::SetText(const char* text)
+{
+	if (!m_pFont)
+	{
+		m_pFont = UI().Font().GetFont(LETTERICA16_FONT_NAME);
+	}
+
+	if (text && text[0] != 0)
+	{
+		if (m_text == text)
+		{
+			return;
+		}
+
+        m_text = text;
+		uFlags.set(flNeedReparse, true);
+	}
+	else
+	{
+		m_text = "";
+		Reset();
+	}
+}
+void CUILines::SetTextST(const char* str_id)
+{
+	SetText	(*g_pStringTable->ParseStringFromScript(str_id));
+}
+
+const char* CUILines::GetText()
+{
+	return m_text.c_str();
+}
+
+void CUILines::Reset()
+{
+	m_lines.clear();
+}
+
+void CUILines::ReloadText()
+{
+	SetTextST(m_text_src.c_str());
+}
+
+float get_str_width(CGameFont*pFont, int ch)
+{
+	if (ch < 0)
+	{
+		ch = (u8)ch;
+	}
+	if (ch >= GAMEPAD_GLYPH_START && ch <= GAMEPAD_GLYPH_END)
+	{
+		Frect rect = CUITextureMaster::GetTextureRect(g_FontManager->GamepadButtonMappings[ch]);
+		float w = pFont->sizeOfImage(rect).x + pFont->GetLetterSpacing();
+		UI().ClientToScreenScaledWidth(w);
+		return w;
+	}
+
+	float ll = pFont->SizeOf_(ch) + pFont->GetLetterSpacing();
+	UI().ClientToScreenScaledWidth(ll);
+	return ll;
+}
+
+void CUILines::ParseText(bool force)
+{
+	if (!force && (!uFlags.test(flComplexMode) || !uFlags.test(flNeedReparse)))
+		return;
+
+	if (nullptr == m_pFont)
+		return;
+
+	Reset();
+
+	CUILine* line = nullptr;
+	if (uFlags.test(flColoringMode))
+		line = ParseTextToColoredLine(m_text.c_str());
+	else
+	{
+		line = new CUILine();
+		CUISubLine			subline;
+		subline.m_text = m_text.c_str();
+		subline.m_color = GetTextColor();
+		line->AddSubLine(&subline);
+	}
+
+	bool bNewLines = false;
+
+	if (uFlags.test(flRecognizeNewLine))
+	{
+		if (m_pFont->IsMultibyte())
+		{
+			CUILine* ptmp_line = new CUILine();
+			int vsz = (int)line->m_subLines.size();
+			VERIFY(vsz);
+			for (int i = 0; i < vsz; i++)
+			{
+				char* pszTemp = nullptr;
+				const u32 tcolor = line->m_subLines[i].m_color;
+				char szTempLine[4096], * pszSearch = nullptr;
+				size_t llen = xr_strlen(line->m_subLines[i].m_text.c_str());
+				VERIFY(llen < 4096);
+				xr_strcpy(szTempLine, line->m_subLines[i].m_text.c_str());
+				pszSearch = szTempLine;
+				while ((pszTemp = strstr(pszSearch, "\\n")) != nullptr)
+				{
+					bNewLines = true;
+					*pszTemp = '\0';
+					ptmp_line->AddSubLine(pszSearch, tcolor);
+					pszSearch = pszTemp + 2;
+				}
+				ptmp_line->AddSubLine(pszSearch, tcolor);
+			}
+			line->Clear();
+			xr_free(line);
+			line = ptmp_line;
+		}
+		else
+		{
+			line->ProcessNewLines();
+		}
+	}
+
+	if (m_pFont->IsMultibyte()) {
+#define UBUFFER_SIZE 100
+		u16	aMarkers[UBUFFER_SIZE];
+		CUILine tmp_line;
+		char szTempLine[4096];
+		float fTargetWidth = 1.0f;
+		UI().ClientToScreenScaledWidth(fTargetWidth);
+		VERIFY((m_wndSize.x > 0) && (fTargetWidth > 0));
+		fTargetWidth = m_wndSize.x / fTargetWidth;
+		int vsz = (int)line->m_subLines.size();
+		VERIFY(vsz);
+		if ((vsz > 1) && (!bNewLines)) { // only colored line, pizdets
+			for (int i = 0; i < vsz; i++) {
+				const char* pszText = line->m_subLines[i].m_text.c_str();
+				const u32 tcolor = line->m_subLines[i].m_color;
+				VERIFY(pszText);
+				tmp_line.AddSubLine(pszText, tcolor);
+			}
+			m_lines.push_back(tmp_line);
+			tmp_line.Clear();
+		}
+		else {
+			for (int i = 0; i < vsz; i++) {
+				const char* pszText = line->m_subLines[i].m_text.c_str();
+				const u32 tcolor = line->m_subLines[i].m_color;
+				u16 uFrom = 0, uPartLen = 0;
+				VERIFY(pszText);
+				u16 nMarkers = m_pFont->SplitByWidth(aMarkers, UBUFFER_SIZE, fTargetWidth, pszText);
+				for (u16 j = 0; j < nMarkers; j++) {
+					uPartLen = aMarkers[j] - uFrom;
+					VERIFY((uPartLen > 0) && (uPartLen < 4096));
+					strncpy_s(szTempLine, pszText + uFrom, uPartLen);
+					szTempLine[uPartLen] = '\0';
+					tmp_line.AddSubLine(szTempLine, tcolor);
+					m_lines.push_back(tmp_line);
+					tmp_line.Clear();
+					// Compiler bug :)
+#pragma warning( disable : 4244 )
+					uFrom += uPartLen;
+#pragma warning( default : 4244 )
+				}
+				strncpy_s(szTempLine, pszText + uFrom, 4096);
+				tmp_line.AddSubLine(szTempLine, tcolor);
+				m_lines.push_back(tmp_line);
+				tmp_line.Clear();
+			}
+		}
+	}
+	else
+	{
+		float max_width = m_wndSize.x;
+		u32 sbl_cnt = (int)line->m_subLines.size();
+		CUILine									tmp_line;
+		string4096								buff;
+		bool has_space_from_prev = false;
+		float curr_width = 0.0f;
+		float __eps = get_str_width(m_pFont, '1');//hack -(
+		for (u32 sbl_idx = 0; sbl_idx < sbl_cnt; ++sbl_idx)
+		{
+			bool b_last_subl = (sbl_idx == sbl_cnt - 1);
+			CUISubLine& sbl = line->m_subLines[sbl_idx];
+			u32 sub_len = (u32)sbl.m_text.length();
+			u32 curr_w_pos = 0;
+
+			u32 last_space_idx = 0;
+
+			xr_special_char* utf16text = nullptr;
+
+#ifdef IXR_WINDOWS
+			if (IsUTF8(sbl.m_text.c_str()))
+			{
+				utf16text = Platform::ANSI_TO_TCHAR(sbl.m_text.c_str());
+				sub_len = wcslen(utf16text);
+			}
+#endif
+
+			for (u32 idx = 0; idx < sub_len; ++idx)
+			{
+				bool b_last_ch = (idx == sub_len - 1);
+
+				if (isspace(sbl.m_text[idx]))
+				{
+					has_space_from_prev = false;
+					last_space_idx = idx;
+				}
+
+				float w1 = get_str_width(m_pFont, utf16text != nullptr ? utf16text[idx] : sbl.m_text[idx]);
+				bool bOver = (curr_width + w1 + __eps > max_width);
+
+				if (bOver || b_last_ch)
+				{
+					bool HandleWrapFromStart = false;
+					// if we have last_space_idx != 0, we have an index of last space in this substring
+					// BUT if we have last_space_idx == 0, we maybe have a space from previous substring from this line!
+					if ((last_space_idx || has_space_from_prev) && !b_last_ch)
+					{
+						HandleWrapFromStart = has_space_from_prev;
+						has_space_from_prev = false;
+						idx = last_space_idx;
+						last_space_idx = 0;
+					}
+					if (!HandleWrapFromStart)
+					{
+#ifdef IXR_WINDOWS
+						if (utf16text != nullptr)
+						{
+							wchar_t tempbuff[4096] = {};
+							wcsncpy_s(tempbuff, sizeof(buff), utf16text + curr_w_pos, idx - curr_w_pos + 1);
+
+							xr_string ValidUTF8Text = Platform::CP_TCHAR_TO_ANSI_U8(tempbuff);
+							strcpy(buff, ValidUTF8Text.c_str());
+						}
+						else
+#endif
+						{
+							strncpy_s(buff, sizeof(buff), sbl.m_text.c_str() + curr_w_pos, idx - curr_w_pos + 1);
+						}
+						tmp_line.AddSubLine(buff, sbl.m_color);
+						curr_w_pos = idx + 1;
+					} else
+					{
+						buff[0] = '\0';
+						tmp_line.AddSubLine(buff, sbl.m_color);
+					}
+				}
+				else
+				{
+					curr_width += w1;
+				}
+
+				if (b_last_ch)
+				{
+					has_space_from_prev = idx == last_space_idx;
+				}
+
+				if (bOver || (b_last_ch && sbl.m_last_in_line))
+				{
+					m_lines.push_back(tmp_line);
+					tmp_line.Clear();
+					curr_width = 0.0f;
+				}
+			}
+			if (b_last_subl && !tmp_line.IsEmpty())
+			{
+				m_lines.push_back(tmp_line);
+				tmp_line.Clear();
+				curr_width = 0.0f;
+			}
+		}
+	}
+
+	xr_delete(line);
+	uFlags.set(flNeedReparse, false);
+}
+
+float CUILines::GetVisibleHeight()
+{
+
+	if (uFlags.test(flComplexMode))
+	{
+		if(uFlags.test(flNeedReparse))
+			ParseText	();
+
+		float _curr_h = m_pFont->CurrentHeight_() + m_pFont->GetLineSpacing();
+		UI().ClientToScreenScaledHeight(_curr_h);
+		return _curr_h * m_lines.size();
+	}
+	else
+	{
+		float _curr_h = m_pFont->GetHeight() + m_pFont->GetLineSpacing();
+		UI().ClientToScreenScaledHeight(_curr_h);
+		return _curr_h;
+	}
+}
+
+void CUILines::SetTextColor(u32 color)
+{
+	if (color == m_dwTextColor)
+		return;
+	uFlags.set(flNeedReparse, true);
+	m_dwTextColor = color; 
+}
+
+void CUILines::SetTextGradientColor(u32 color)
+{
+	if (color == m_dwTextGradientColor)
+		return;
+	uFlags.set(flNeedReparse, true);
+	m_dwTextGradientColor = color;
+}
+
+void CUILines::SetFont(CGameFont* pFont)
+{
+	if (pFont == m_pFont)
+		return;
+	uFlags.set(flNeedReparse, true);
+	m_pFont = pFont;
+}
+
+void CUILines::SetTextGradient(bool val)
+{
+	if (!m_pFont)
+		return;
+	uFlags.set(flNeedReparse, true);
+	m_pFont->SetGradient(val);
+}
+
+const char* GetElipsisText(CGameFont* pFont, float width, const char* source_text, LPSTR buff, int buff_len)
+{
+	float text_len					= pFont->SizeOf_(source_text);
+	UI().ClientToScreenScaledWidth	(text_len);
+
+	if(text_len<width)
+	{
+		return source_text;
+	}else
+	{
+		buff[0]							= 0;
+		float el_len					= pFont->SizeOf_("..");
+		UI().ClientToScreenScaledWidth	(el_len);
+		float total						= 0.0f;
+		u16		pos						= 0;
+		
+		while(total+el_len < width)
+		{
+			int c					= *(source_text+pos);
+			float ch_len					= pFont->SizeOf_(c);
+			UI().ClientToScreenScaledWidth	(ch_len);
+		
+			if(total+ch_len+el_len < width)
+				buff[pos]				= c;
+
+			total						+= ch_len;
+			++pos;
+			buff[pos]					= 0;
+		}
+
+		xr_strcat						(buff,buff_len,"..");
+		return							buff;
+	}
+}
+
+void CUILines::SetTextShadow(bool enabled, float thickness, u32 color)
+{
+	m_textShadow.enabled = enabled && (thickness > 0.0f) && (color_get_A(color) > 0);
+	m_textShadow.thickness = thickness;
+	m_textShadow.color = color;
+}
+
+void CUILines::SetTextShadow(const SUIOutlineParams& params)
+{
+	SetTextShadow(params.enabled, params.thickness, params.color);
+}
+
+void CUILines::Draw(float x, float y)
+{
+	DrawInternal(x, y, false);
+}
+
+void CUILines::DrawWS(float x, float y)
+{
+	DrawInternal(x, y, true);
+}
+
+void CUILines::DrawInternal(float x, float y, bool worldSpace)
+{
+	x += m_TextOffset.x;
+	y += m_TextOffset.y;
+
+	static string256 passText;
+
+	if (m_text.size() == 0)
+	{
+		return;
+	}
+
+	R_ASSERT(m_pFont);
+	m_pFont->SetGradientColor(m_dwTextGradientColor);
+
+	const u32 textAlpha = color_get_A(m_dwTextColor);
+	u32 outlineColor = 0;
+	if (m_textShadow.enabled && m_textShadow.thickness > 0.0f && textAlpha > 0)
+	{
+		const u32 outlineAlpha = (color_get_A(m_textShadow.color) * textAlpha) / 255;
+		if (outlineAlpha > 0)
+		{
+			outlineColor = subst_alpha(m_textShadow.color, outlineAlpha);
+		}
+	}
+
+	auto emitSimple = [&](float ox, float oy, u32 color)
+	{
+		m_pFont->SetColor(color);
+		const CGameFont::EAligment drawAlign =
+			(m_eTextAlign == CGameFont::alJustify) ? CGameFont::alLeft : (CGameFont::EAligment)m_eTextAlign;
+		m_pFont->SetAligment(drawAlign);
+		m_pFont->SetGradientMode(m_eTextGradientMode);
+
+		if (!worldSpace)
+		{
+			Fvector2 textPos;
+			textPos.set(x + ox + GetIndentByAlign(), y + oy + GetVIndentByAlign());
+			UI().ClientToScreenScaled(textPos);
+
+			if (uFlags.test(flPasswordMode))
+			{
+				const int sz = (int)m_text.size();
+				for (int i = 0; i < sz; i++)
+				{
+					passText[i] = '*';
+				}
+				passText[sz] = 0;
+				m_pFont->Out(textPos.x, textPos.y, "%s", passText);
+			}
+			else if (uFlags.test(flEllipsis))
+			{
+				const u32 buffLen = sizeof(char) * xr_strlen(m_text.c_str()) + 1;
+				char* p = static_cast<char*>(_alloca(buffLen));
+				const char* str = GetElipsisText(m_pFont, m_wndSize.x, m_text.c_str(), p, buffLen);
+				m_pFont->Out(textPos.x, textPos.y, "%s", str);
+			}
+			else
+			{
+				m_pFont->Out(textPos.x, textPos.y, "%s", m_text.c_str());
+			}
+		}
+		else
+		{
+			const float posY = y + oy + GetVIndentByAlign();
+			const float posX = x + ox;
+
+			if (uFlags.test(flPasswordMode))
+			{
+				const int sz = (int)m_text.size();
+				for (int i = 0; i < sz; i++)
+				{
+					passText[i] = '*';
+				}
+				passText[sz] = 0;
+				m_pFont->Out(posX, posY, "%s", passText);
+			}
+			else if (uFlags.test(flEllipsis))
+			{
+				const u32 buffLen = sizeof(char) * xr_strlen(m_text.c_str()) + 1;
+				char* p = static_cast<char*>(_alloca(buffLen));
+				LPCSTR str = GetElipsisText(m_pFont, m_wndSize.x, m_text.c_str(), p, buffLen);
+				m_pFont->Out(posX, posY, "%s", str);
+			}
+			else
+			{
+				m_pFont->Out(posX, posY, "%s", m_text.c_str());
+			}
+		}
+	};
+
+	auto emitComplex = [&](float ox, float oy, u32 colorOverride)
+	{
+		ParseText();
+
+		float posY = y + oy + GetVIndentByAlign();
+		float height = m_pFont->CurrentHeight_() + m_pFont->GetLineSpacing();
+		if (!worldSpace)
+		{
+			UI().ClientToScreenScaledHeight(height);
+		}
+
+		const u32 size = (u32)m_lines.size();
+		const bool useJustify = (m_eTextAlign == CGameFont::alJustify) && (size > 1);
+		m_pFont->SetAligment(useJustify ? CGameFont::alLeft : (CGameFont::EAligment)m_eTextAlign);
+		m_pFont->SetGradientMode(m_eTextGradientMode);
+		for (u32 i = 0; i < size; ++i)
+		{
+			const float posX = x + ox + (worldSpace ? 0.0f : GetIndentByAlign());
+			const bool justifyLine = useJustify && (i + 1 < size);
+			if (worldSpace)
+			{
+				if (justifyLine)
+				{
+					m_lines[i].DrawJustifiedWS(m_pFont, posX, posY, m_wndSize.x, colorOverride);
+				}
+				else
+				{
+					m_lines[i].DrawWS(m_pFont, posX, posY, colorOverride);
+				}
+			}
+			else
+			{
+				if (justifyLine)
+				{
+					m_lines[i].DrawJustified(m_pFont, posX, posY, m_wndSize.x, colorOverride);
+				}
+				else
+				{
+					m_lines[i].Draw(m_pFont, posX, posY, colorOverride);
+				}
+			}
+			posY += height;
+		}
+	};
+
+	if (!uFlags.is(flComplexMode))
+	{
+		if (outlineColor != 0)
+		{
+			for (const Fvector2& d : UIOutline::kDirs8)
+			{
+				emitSimple(d.x * m_textShadow.thickness, d.y * m_textShadow.thickness, outlineColor);
+			}
+		}
+		emitSimple(0.0f, 0.0f, m_dwTextColor);
+	}
+	else
+	{
+		if (outlineColor != 0)
+		{
+			for (const Fvector2& d : UIOutline::kDirs8)
+			{
+				emitComplex(d.x * m_textShadow.thickness, d.y * m_textShadow.thickness, outlineColor);
+			}
+		}
+		emitComplex(0.0f, 0.0f, 0);
+	}
+
+	m_pFont->OnRender();
+}
+
+void CUILines::OnDeviceReset()
+{
+	uFlags.set(flNeedReparse, true);
+}
+
+float CUILines::GetIndentByAlign()const
+{
+	switch (m_eTextAlign)
+	{
+	case CGameFont::alCenter:
+		{
+			return (m_wndSize.x)/2;
+		}break;
+	case CGameFont::alLeft:
+	case CGameFont::alJustify:
+		{
+			return 0;
+		}break;
+	case CGameFont::alRight:
+		{
+			return (m_wndSize.x);
+		}break;
+	default:
+			NODEFAULT;
+	}
+#ifdef DEBUG
+	return 0;
+#endif
+}
+
+float CUILines::GetVIndentByAlign()
+{
+	switch(m_eVTextAlign) {
+	case valTop: 
+		return 0;
+	case valCenter:
+		return (m_wndSize.y - GetVisibleHeight())/2;
+	case valBotton:
+		return m_wndSize.y - GetVisibleHeight();
+	default:
+		NODEFAULT;
+	}
+#ifdef DEBUG
+	return 0;
+#endif
+}
+
+// %c[255,255,255,255]
+u32 CUILines::GetColorFromText(const xr_string& str)const
+{
+	StrSize begin, end, comma1_pos, comma2_pos, comma3_pos;
+
+	begin = str.find(BEGIN);
+	end = str.find(END, begin);
+
+	if (begin == npos || end == npos || npos != str.find("%c[default]", begin))
+	{
+#ifdef _DEBUG
+		Msg("CUISubLine::GetColorFromText stopped");
+#endif // _DEBUG
+		return m_dwTextColor;
+	}
+
+	// Try predefined in XML colors
+	for (CUIXmlInit::ColorDefs::const_iterator it = CUIXmlInit::GetColorDefs()->begin(); it != CUIXmlInit::GetColorDefs()->end(); ++it)
+	{
+		int cmp = str.compare(begin+3, end-begin-3, *it->first);			
+		if (cmp == 0)
+			return it->second;
+	}
+
+	// try parse values separated by commas
+	comma1_pos = str.find(",", begin);
+	comma2_pos = str.find(",", comma1_pos + 1);
+	comma3_pos = str.find(",", comma2_pos + 1);
+
+    R_ASSERT2(npos != comma1_pos, "CUISubLine::GetColorFromText -- can't find first comma");        
+	R_ASSERT2(npos != comma2_pos, "CUISubLine::GetColorFromText -- can't find second comma");
+	R_ASSERT2(npos != comma3_pos, "CUISubLine::GetColorFromText -- can't find third comma");
+	
+
+	u32 a, r, g, b;
+	xr_string single_color;
+
+	begin+=3;
+
+	single_color = str.substr(begin, comma1_pos - 1);
+	a = atoi(single_color.c_str());
+	single_color = str.substr(comma1_pos + 1, comma2_pos - 1);
+	r = atoi(single_color.c_str());
+	single_color = str.substr(comma2_pos + 1, comma3_pos - 1);
+	g = atoi(single_color.c_str());
+	single_color = str.substr(comma3_pos + 1, end - 1);
+	b = atoi(single_color.c_str());
+
+    return color_argb(a,r,g,b);
+}
+
+CUILine* CUILines::ParseTextToColoredLine(const xr_string& str)
+{
+	CUILine* line = new CUILine();
+	xr_string tmp = str;
+	xr_string entry;
+	u32 color;
+
+	do 
+	{
+		CutFirstColoredTextEntry(entry, color, tmp);		
+		line->AddSubLine(entry, subst_alpha(color, color_get_A(GetTextColor())));
+	} 
+	while (tmp.size()>0);
+
+	return line;
+}
+
+void CUILines::CutFirstColoredTextEntry(xr_string& entry, u32& color, xr_string& text) const 
+{
+	entry.clear();
+	
+	StrSize begin	= text.find(BEGIN);
+	StrSize end	= text.find(END, begin);
+	if (xr_string::npos == end)
+		begin = end;
+	StrSize begin2	= text.find(BEGIN, end);
+	StrSize end2	= text.find(END,begin2);
+	if (xr_string::npos == end2)
+		begin2 = end2;
+
+	// if we do not have any color entry or it is single with 0 position
+	if (xr_string::npos == begin)
+	{
+		entry = text;
+		color = m_dwTextColor;
+		text.clear();
+	}
+	else if (0 == begin && xr_string::npos == begin2)
+	{
+		entry = text;
+		color = GetColorFromText(entry);
+		entry.replace(begin, end - begin + 1, "");
+		text.clear();
+	}
+	// if we have color entry not at begin
+	else if (0 != begin)
+	{
+		entry = text.substr(0, begin );
+		color = m_dwTextColor;
+		text.replace(0, begin, "");
+	}
+	// if we have two color entries. and first has 0 position
+	else if (0 == begin && xr_string::npos != begin2)
+	{
+		entry = text.substr(0, begin2);
+		color = GetColorFromText(entry);
+		entry.replace(begin, end - begin + 1, "");
+		text.replace(0, begin2, "");
+	}
+}
+
+

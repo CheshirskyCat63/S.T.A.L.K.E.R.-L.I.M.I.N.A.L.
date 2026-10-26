@@ -1,0 +1,310 @@
+#include "stdafx.h"
+
+#include "EditMesh.h"
+#include "EditObject.h"
+#include "ui_main.h"
+#include "pick_defs.h"
+
+static IntVec		sml_processed;
+static Fvector		sml_normal;
+static float		m_fSoftAngle;
+ECORE_API CDB::COLLIDER XRC;
+//----------------------------------------------------
+
+//----------------------------------------------------
+// номер face должен соответствовать списку
+//----------------------------------------------------
+void CEditableMesh::GenerateCFModel()
+{
+	UnloadCForm();
+	thread_local CDB::Collector CL;
+	CL.clear();
+
+	// double sided
+	CL.reserve(m_Faces.size());
+	for (SurfFacesPairIt sp_it = m_SurfFaces.begin(); sp_it != m_SurfFaces.end(); sp_it++)
+	{
+		IntVec& face_lst = sp_it->second;
+		for (IntIt it = face_lst.begin(); it != face_lst.end(); it++)
+		{
+			st_Face& F = m_Faces[*it];
+			CL.add_face_D(m_Vertices[F.pv[0].pindex], m_Vertices[F.pv[1].pindex], m_Vertices[F.pv[2].pindex], *it);
+			if (sp_it->first->m_Flags.is(CSurface::sf2Sided))
+			{
+				CL.add_face_D(m_Vertices[F.pv[2].pindex], m_Vertices[F.pv[1].pindex], m_Vertices[F.pv[0].pindex], *it);
+			}
+		}
+	}
+
+	m_CFModel = xr_make_unique<CDB::MODEL>();
+	m_CFModel->build(CL.getV(), CL.getVS(), CL.getT(), CL.getTS(), nullptr, nullptr, nullptr, false, false);
+}
+
+void CEditableMesh::RayQuery(SPickQuery& pinf)
+{
+	if (!m_CFModel)
+	{
+		GenerateCFModel();
+		m_CFModel->wait_loading();
+	}
+
+	XRC.ray_query(m_CFModel.get(), pinf.m_Start, pinf.m_Direction, pinf.m_Dist);
+	for (int r = 0; r < XRC.r_count(); r++)
+	{
+		pinf.append(XRC.r_begin() + r, m_Parent, this);
+	}
+}
+
+void CEditableMesh::RayQuery(const Fmatrix& parent, const Fmatrix& inv_parent, SPickQuery& pinf)
+{
+	if (!m_CFModel)
+	{
+		GenerateCFModel();
+		m_CFModel->wait_loading();
+	}
+
+	Fvector S, D;
+	inv_parent.transform_tiny(S, pinf.m_Start);
+	inv_parent.transform_dir(D, pinf.m_Direction);
+
+	XRC.ray_query(m_CFModel.get(), S, D, pinf.m_Dist);
+	for (int r = 0; r < XRC.r_count(); r++)
+	{
+		pinf.append_mtx(parent, XRC.r_begin() + r, m_Parent, this);
+	}
+}
+
+void CEditableMesh::BoxQuery(const Fmatrix& parent, const Fmatrix& inv_parent, SPickQuery& pinf)
+{
+	if (!m_CFModel)
+	{
+		GenerateCFModel();
+		m_CFModel->wait_loading();
+	}
+
+	Fbox dest;
+	dest.xform(pinf.m_BB, inv_parent);
+	Fvector c, d;
+	dest.getcenter(c);
+	dest.getradius(d);
+
+	XRC.box_query(m_CFModel.get(), c, d);
+	for (int r = 0; r < XRC.r_count(); r++)
+	{
+		pinf.append_mtx(parent, XRC.r_begin() + r, m_Parent, this);
+	}
+}
+
+static const float _sqrt_flt_max = _sqrt(flt_max*0.5f);
+
+bool CEditableMesh::RayPick(float& distance, const Fvector& start, const Fvector& direction, const Fmatrix& inv_parent, SRayPickInfo* pinf)
+{
+	if (!m_Flags.is(flVisible))
+	{
+		return false;
+	}
+
+	if (!m_CFModel)
+	{
+		GenerateCFModel();
+		m_CFModel->wait_loading();
+	}
+
+	XRC.ray_options(CDB::OPT_ONLYNEAREST | CDB::OPT_CULL);
+
+	Fvector S, D;
+	inv_parent.transform_tiny(S, start);
+	inv_parent.transform_dir(D, direction);
+
+	XRC.ray_query(m_CFModel.get(), S, D, _sqrt_flt_max);
+
+	if (XRC.r_count())
+	{
+		CDB::RESULT* I = XRC.r_begin();
+		if (I->range < distance)
+		{
+			if (pinf)
+			{
+				pinf->SetRESULT(m_CFModel.get(), I);
+				pinf->e_obj = m_Parent;
+				pinf->e_mesh = this;
+				pinf->pt.mul(direction, pinf->inf.range);
+				pinf->pt.add(start);
+			}
+
+			distance = I->range;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool CEditableMesh::CHullPickMesh(PlaneVec& pl, const Fmatrix& parent)
+{
+	Fvector p;
+	boolVec inside;
+	inside.assign(m_Vertices.size(), true);
+	for (u32 v_id = 0; v_id < m_Vertices.size(); v_id++)
+	{
+		parent.transform_tiny(p, m_Vertices[v_id]);
+		for (PlaneIt p_it = pl.begin(); p_it != pl.end(); p_it++)
+		{
+			if (p_it->classify(p) > EPS_L)
+			{
+				inside[v_id] = false;
+				break;
+			}
+		}
+	}
+
+	for (u32 f_id = 0; f_id < m_Faces.size(); f_id++)
+	{
+		if (inside[m_Faces[f_id].pv[0].pindex] && inside[m_Faces[f_id].pv[1].pindex] && inside[m_Faces[f_id].pv[2].pindex])
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void CEditableMesh::RecurseTri(int id)
+{
+	// Check if triangle already processed
+	if (std::find(sml_processed.begin(), sml_processed.end(), id) != sml_processed.end())
+	{
+		return;
+	}
+
+	sml_processed.push_back(id);
+
+	// recurse
+	for (int k = 0; k < 3; k++)
+	{
+		IntVec& PL = (*m_Adjs)[m_Faces[id].pv[k].pindex];
+		for (IntIt pl_it = PL.begin(); pl_it != PL.end(); pl_it++)
+		{
+			Fvector& test_normal = m_FaceNormals[*pl_it];
+			float cosa = test_normal.dotproduct(sml_normal);
+			if (cosa < m_fSoftAngle)
+			{
+				continue;
+			}
+			RecurseTri(*pl_it);
+		}
+	}
+}
+
+void CEditableMesh::GetTiesFaces(int start_id, U32Vec& fl, float fSoftAngle, bool bRecursive)
+{
+	R_ASSERT(start_id < int(m_Faces.size()));
+	m_fSoftAngle = cosf(deg2rad(fSoftAngle));
+	GenerateFNormals();
+	GenerateAdjacency();
+	VERIFY(!m_FaceNormals.empty());
+
+	if (bRecursive)
+	{
+		sml_processed.clear();
+		sml_normal.set(m_FaceNormals[start_id]);
+		RecurseTri(start_id);
+		fl.insert(fl.begin(), sml_processed.begin(), sml_processed.end());
+	}
+	else
+	{
+		for (int k = 0; k < 3; k++)
+		{
+			fl.insert(fl.end(), (*m_Adjs)[m_Faces[start_id].pv[k].pindex].begin(), (*m_Adjs)[m_Faces[start_id].pv[k].pindex].end());
+		}
+		std::sort(fl.begin(), fl.end());
+		fl.erase(std::unique(fl.begin(), fl.end()), fl.end());
+	}
+	UnloadFNormals();
+	UnloadAdjacency();
+}
+
+bool CEditableMesh::BoxPick(const Fbox& box, const Fmatrix& inv_parent, SBoxPickInfoVec& pinf)
+{
+	if (!m_CFModel)
+	{
+		GenerateCFModel();
+		m_CFModel->wait_loading();
+	}
+
+	Fbox dest;
+	dest.xform(box, inv_parent);
+	Fvector c, d;
+	dest.getcenter(c);
+	dest.getradius(d);
+
+	XRC.box_query(m_CFModel.get(), c, d);
+	if (XRC.r_count())
+	{
+		pinf.push_back(SBoxPickInfo());
+		pinf.back().e_obj = m_Parent;
+		pinf.back().e_mesh = this;
+		for (CDB::RESULT* I = XRC.r_begin(); I != XRC.r_end(); I++)
+		{
+			pinf.back().AddRESULT(m_CFModel.get(), I);
+		}
+
+		return true;
+	}
+
+	return false;
+}
+
+bool CEditableMesh::FrustumPick(const CFrustum& frustum, const Fmatrix& parent)
+{
+	if (!m_Flags.is(flVisible))
+	{
+		return false;
+	}
+
+	Fvector p[3];
+	for (u32 i = 0; i < m_Faces.size(); i++)
+	{
+		for (int k = 0; k < 3; k++)
+		{
+			parent.transform_tiny(p[k], m_Vertices[m_Faces[i].pv[k].pindex]);
+		}
+
+		if (frustum.testPolyInside(p, 3))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void CEditableMesh::FrustumPickFaces(const CFrustum& frustum, const Fmatrix& parent, U32Vec& fl)
+{
+	if (!m_Flags.is(flVisible))
+	{
+		return;
+	}
+
+	Fvector p[3];
+	bool bCulling = EPrefs->bp_cull;
+	for (u32 p_id = 0; p_id < m_Faces.size(); p_id++)
+	{
+		for (int k = 0; k < 3; ++k)
+		{
+			parent.transform_tiny(p[k], m_Vertices[m_Faces[p_id].pv[k].pindex]);
+		}
+
+		if (bCulling)
+		{
+			Fplane P;
+			P.build(p[0], p[1], p[2]);
+			if (P.classify(EContext.UI->CurrentView().m_Camera.GetPosition()) < 0)
+			{
+				continue;
+			}
+		}
+		if (frustum.testPolyInside(p, 3))
+		{
+			fl.push_back(p_id);
+		}
+	}
+}

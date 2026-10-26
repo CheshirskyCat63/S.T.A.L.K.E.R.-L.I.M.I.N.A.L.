@@ -1,0 +1,59 @@
+// File:        UIComboBox_script.cpp
+// Description: exports CUIComobBox to LUA environment
+// Created:     11.12.2004
+// Author:      Serhiy O. Vynnychenko
+// Mail:        narrator@gsc-game.kiev.ua
+//
+// Copyright 2004 GSC Game World
+//
+
+#include "stdafx.h"
+#include "UIComboBox.h"
+#include "UIListBoxItem.h"
+
+#include <luabind/luabind.hpp>
+using namespace luabind;
+
+void AssignProps_script_combo(CUIComboBox* cb, const char* entry, const char* group)
+{
+	cb->AssignProps(entry, group);
+}
+
+void SetSystemDepends_script_combo(CUIComboBox* cb, int depend)
+{
+	cb->SetSystemDepends((CUIOptionsItem::ESystemDepends)depend);
+}
+
+#pragma optimize("s",on)
+void CUIComboBox::script_register(lua_State *L)
+{
+	module(L)
+	[
+		class_<CUIComboBox, CUIWindow>("CUIComboBox")
+		.def(						constructor<>())
+		.def("SetVertScroll",		&CUIComboBox::SetVertScroll)
+		.def("SetListLength",		&CUIComboBox::SetListLength)
+		.def("CurrentID",			&CUIComboBox::CurrentID)
+		.def("disable_id",			&CUIComboBox::disable_id)
+		.def("enable_id",			&CUIComboBox::enable_id)
+		.def("AddItem",				&CUIComboBox::AddItem_)
+		.def("GetText",				&CUIComboBox::GetText)
+		.def("GetTextOf",			&CUIComboBox::GetTextOf)
+		.def("GetValueOf",			&CUIComboBox::GetValueOf)
+		.def("SetText",				&CUIComboBox::SetText)
+		.def("ClearList",			&CUIComboBox::ClearList)
+		.def("SetCurrentOptValue",	&CUIComboBox::SetCurrentOptValue)
+		.def("SetCurrentIdx",		&CUIComboBox::SetSelectedIDX)
+		.def("GetCurrentIdx",		&CUIComboBox::GetSelectedIDX)
+		.def("AssignProps",			&AssignProps_script_combo)
+		.def("SetSystemDepends",	&SetSystemDepends_script_combo)
+		.def("GetListBox",			&CUIComboBox::GetListBox)
+		.def("OnListItemSelect",	&CUIComboBox::OnListItemSelect)
+		.def("ShowList",			&CUIComboBox::ShowList)
+		.def("IsListShown",			&CUIComboBox::IsListShown)
+		.def("SetHighlighted",		&CUIComboBox::SetHighlighted)
+		.def("GetSize",				&CUIComboBox::GetSize)
+		.def("SetItemIDX",			&CUIComboBox::SetItemIDX)
+
+	];
+}

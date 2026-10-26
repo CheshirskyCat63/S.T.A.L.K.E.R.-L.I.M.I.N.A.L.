@@ -1,0 +1,198 @@
+#pragma once
+
+// r3xx code-path (MRT)
+#if USE_DX11
+#define		r2_RT_P				"$user$position"		      // MRT
+#define		r2_RT_N				"$user$normal"			      // MRT
+#define		r2_RT_S				"$user$surface"			      // MRT
+#define		r2_RT_albedo		"$user$albedo"			      // MRT
+#define		r2_RT_velocity		"$user$velocity"			  // MRT
+
+#define		r2_RT_N_temp		"$user$normal_temp"		      // MRT
+#define		r2_RT_S_temp		"$user$surface_temp"	      // MRT
+#else
+#define		r2_RT_depth			"$user$depth"			// MRT
+#define		r2_RT_P				"$user$position"		// MRT
+#define		r2_RT_N				"$user$normal"			// MRT
+#define		r2_RT_albedo		"$user$albedo"			// MRT
+#endif //USE_DX11
+// other
+#define		r2_RT_accum			"$user$accum"			// ---	16 bit fp or 16 bit fx
+#define		r2_RT_accum_temp	"$user$accum_temp"		// ---	16 bit fp - only for HW which doesn't feature fp16 blend
+
+#define		r2_T_envs0			"$user$env_s0"			// ---
+#define		r2_T_envs1			"$user$env_s1"			// ---
+
+#define		r2_T_sky0			"$user$sky0" 
+#define		r2_T_sky1			"$user$sky1" 
+
+#define		r2_RT_generic0		"$user$generic0"		// ---
+#define		r2_RT_generic1		"$user$generic1"		// ---
+#define		r2_RT_generic2		"$user$generic2"		// ---	//	Igor: for volumetric lights
+#define		r2_RT_gamma_lut		"$user$gamma_lut"
+
+#define		r2_RT_backbuffer_lut "$user$backbufferlut"
+#define		r2_RT_generic0_prev "$user$generic0_prev"
+
+#define		r2_RT_env			"$user$env"
+#define		r2_RT_env_depth		"$user$env_depth"
+#define		r2_RT_env_fwd		"$user$env_fwd"
+#define		r2_RT_env_temp		"$user$env_temp"
+
+#define		r2_RT_upscaled_depth "$user$upscaled_depth"
+#define		r2_RT_upscaled_depth_old "$user$upscaled_depth_old"
+
+#define		r2_RT_ui_depth		"$user$ui_depth"
+#define		r2_RT_ui_color		"$user$ui_color"
+
+#define		r2_RT_planar_depth		"$user$planar_depth"
+#define		r2_RT_planar_color		"$user$planar_color"
+
+#define		r2_RT_sslr			"$user$sslr"
+#define		r2_RT_sslr_old		"$user$sslr_old"
+#define		r2_RT_sslr_data		"$user$sslr_data"
+#define		r2_RT_sslr_temp		"$user$sslr_temp"
+#define		r2_RT_sslr_hiz		"$user$sslr_hiz"		// min-Z pyramid for the hierarchical trace
+
+#define		r2_RT_ssao_temp		"$user$ssao_temp"		//temporary rt for ssao calculation
+#define		r2_RT_half_depth	"$user$half_depth"		//temporary rt for hbao calculation
+
+#if USE_DX11
+	#define r2_RT_generic "$user$generic"
+	#define r2_RT_backbuffer_final "$user$backbuffer"
+	#define r2_RT_backbuffer_lut "$user$backbufferlut"
+	#define r2_RT_backbuffer_AA "$user$backbuffer_aa"
+
+	#define r2_RT_wboit "$user$wboit"
+	#define r2_RT_wboit_revealage "$user$wboit_revealage"
+
+	#define r2_RT_bloomA  "$user$bloomA"
+	#define r2_RT_bloomB  "$user$bloomB"
+	#define r2_RT_bloomC  "$user$bloomC"
+	#define r2_RT_bloomD  "$user$bloomD"
+	#define r2_RT_bloomE  "$user$bloomE"
+	#define r2_RT_bloomF  "$user$bloomF"
+	#define r2_RT_bloomG  "$user$bloomG"
+	#define r2_RT_bloomA2 "$user$bloomA2"
+	#define r2_RT_bloomB2 "$user$bloomB2"
+	#define r2_RT_bloomC2 "$user$bloomC2"
+	#define r2_RT_bloomD2 "$user$bloomD2"
+	#define r2_RT_bloomE2 "$user$bloomE2"
+	#define r2_RT_bloomF2 "$user$bloomF2"
+
+	#define r2_RT_lumA "$user$lum_A"
+	#define r2_RT_lumB "$user$lum_B"
+	#define r2_RT_lumC "$user$lum_C"
+#else
+	#define r2_RT_bloom1 "$user$bloom1"
+	#define r2_RT_bloom2 "$user$bloom2"
+
+	#define r2_RT_luminance_t64	"$user$lum_t64"
+	#define r2_RT_luminance_t8 "$user$lum_t8"
+	#define r2_RT_luminance_src	"$user$tonemap_src"
+	#define r2_RT_luminance_pool "$user$luminance"
+#endif //USE_DX11
+
+#define r2_RT_luminance_cur	"$user$tonemap"
+
+#define		r2_RT_dof_focus			"$user$dof_focus"		// --- 24 bit, 1x1, current focus distance
+#define		r2_RT_dof_focus_prev	"$user$dof_focus_prev"	// --- 24 bit, 1x1, previous frame focus distance
+#define		r2_RT_dof_coc			"$user$dof_coc"			// --- 16 bit, dim, circle of confusion
+#define		r2_RT_dof_coc_prev		"$user$dof_coc_prev"	// --- 16 bit, dim, previous frame circle of confusion
+#define 	r2_RT_dof_blur1			"$user$dof_blur1"		// --- 32 bit, dim, blur pass1
+#define 	r2_RT_dof_blur2			"$user$dof_blur2"		// --- 32 bit, dim, blur pass2
+#define 	r2_RT_dof_blur3			"$user$dof_blur3"		// --- 32 bit, dim, blur pass3
+
+#define		r2_RT_smap_surf		"$user$smap_surf"		// --- directional
+#define		r2_RT_smap_depth	"$user$smap_depth"		// ---directional
+#define		r2_RT_smap_depth_sun	"$user$smap_depth_sun"
+
+#define		r2_material			"$user$material"		// ---
+#define		r2_ds2_fade			"$user$ds2_fade"		// ---
+
+#define		r2_jitter			"$user$jitter_"			// --- dither
+#define		r2_sunmask			"shaders\\shaders_sunmask"
+
+#define		r2_RT_smaa_edgetex "$user$edgetex"
+#define		r2_RT_smaa_blendtex "$user$blendtex"
+
+#define		r_ui_pda			"$user$ui_pda"
+
+#define		JITTER(a) r2_jitter #a
+
+const		float				SMAP_near_plane		= .1f	;
+
+#define SMAP_adapt_min (RImplementation.o.smapsize / 64)    //GSC - 32. Now 2048 / 64 = 32, same for 2048 atlas size    
+#define SMAP_adapt_optimal (RImplementation.o.smapsize / 4)    //GSC - 768. Now 2048 / 4 = 512, seems legit fits 16 shadowmaps
+#define SMAP_adapt_max (RImplementation.o.smapsize / 2)    //GSC - 1536. Now 2048 / 2 = 1024, seems legit fits 4 shadowmaps
+
+const		u32					TEX_material_LdotN	= 128	;	// diffuse,		X, almost linear = small res
+const		u32					TEX_material_LdotH	= 256	;	// specular,	Y
+#define		SE_R2_HUD			5	// hud generation
+
+#if USE_DX11
+const		u32					TEX_material_Count	= 4		;	// Number of materials,	Z
+#endif //USE_DX11
+
+const		u32					TEX_jitter = 64;
+const		u32					TEX_jitter_count = 3;	// for HBAO
+
+const		u32					BLOOM_size_X = 256;
+const		u32					BLOOM_size_Y = 256;
+const		u32					LUMINANCE_size = 16;
+
+// deffer
+#define		SE_R2_NORMAL_HQ		0	// high quality/detail
+#define		SE_R2_NORMAL_LQ		1	// low quality
+#define		SE_R2_SHADOW		2	// shadow generation
+#define		SE_R2_REFLECTIONS	3	// reflections generation
+#define		SE_R2_UI			4	// ui static generation
+
+#if USE_DX11
+#define		SE_R2_DETAIL_SHADOW_HQ 2	 // shadow generation (Wind)
+#define		SE_R2_DETAIL_SHADOW_LQ 3	 // shadow generation (Stil)
+#endif //USE_DX11
+
+// spot
+#define		SE_L_FILL			0
+#define		SE_L_UNSHADOWED		1
+#define		SE_L_NORMAL			2	// typical, scaled
+#define		SE_L_FULLSIZE		3	// full texture coverage
+#define		SE_L_TRANSLUENT		4	// with opacity/color mask
+
+// mask
+#define		SE_MASK_SPOT		0
+#define		SE_MASK_POINT		1
+#define		SE_MASK_DIRECT		2
+#define		SE_MASK_ACCUM_VOL	3
+#define		SE_MASK_ACCUM_2D	4
+#define		SE_MASK_ALBEDO		5
+
+// sun
+#define		SE_SUN_NEAR			0
+#define		SE_SUN_MIDDLE		1
+#define		SE_SUN_FAR			2
+
+#if USE_DX11
+//	For rain R3 rendering
+#define		SE_SUN_RAIN_SMAP	3
+#endif //USE_DX11
+
+extern float ps_r2_gloss_factor;
+
+IC float u_diffuse2s(float x, float y, float z)
+{
+	float v = (x + y + z) * 0.33333f;
+	return ps_r2_gloss_factor * ((v < 1) ? powf(v, 0.666666f) : v);
+}
+
+IC float u_diffuse2s(Fvector3& c)
+{
+	return u_diffuse2s(c.x, c.y, c.z);
+}
+
+IC float u_diffuse2s(Fcolor& c)
+{
+	return u_diffuse2s(c.r, c.g, c.b);
+}
+

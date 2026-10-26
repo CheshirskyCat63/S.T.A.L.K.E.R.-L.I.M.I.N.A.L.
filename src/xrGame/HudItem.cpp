@@ -1,0 +1,1324 @@
+#include "StdAfx.h"
+#include "BodycamNative.h"
+#include "script_game_object.h"
+#include "HudItem.h"
+#include "physic_item.h"
+#include "Actor.h"
+#include "ActorEffector.h"
+#include "Missile.h"
+#include "xrMessages.h"
+#include "Level.h"
+#include "Inventory.h"
+#include "../xrEngine/CameraBase.h"
+#include "../xrEngine/SkeletonMotions.h"
+#include "../../xrUI/ui_base.h"
+#include "HUDManager.h"
+#include "../xrScripts/script_callback_ex.h"
+#include "Weapon.h"
+#include "../Include/xrRender/UIRender.h"
+#include "ui/UIScriptWnd.h"
+
+CHudItem::CHudItem()
+{
+	m_eDevicesFlags.zero();
+	CurrentHudDesc = &SHudItemDesc::Registry::Get(shared_str());
+}
+
+void CHudItem::SetHudSection(const shared_str& Section)
+{
+	hud_sect = Section;
+	CurrentHudDesc = &SHudItemDesc::Registry::Get(hud_sect);
+	m_current_inertion = CurrentHudDesc->Inertion;
+}
+
+DLL_Pure *CHudItem::_construct()
+{
+	m_object = smart_cast<CPhysicItem*>(this);
+	VERIFY(m_object);
+
+	m_item = smart_cast<CInventoryItem*>(this);
+	VERIFY(m_item);
+
+	return m_object;
+}
+
+void CHudItem::Load(const char* section)
+{
+	SetHudSection(READ_IF_EXISTS(pSettings, r_string, section, "hud", nullptr));
+	hud_sect_cache = hud_sect;
+
+	if (m_animation_slot != u32(-1)) // if it has default hardcoded slot, then don't crash
+		pSettings->read_if_exists(m_animation_slot, section, "animation_slot");
+	else // if it doesn't, then crash if line is missing from config
+		m_animation_slot		= pSettings->r_u32			(section,"animation_slot");
+
+	m_fActorCamSpeedFactor = READ_IF_EXISTS(pSettings, r_float, section, "actor_camera_speed_factor", 1.0f);
+
+	ScriptUIFunctor = READ_IF_EXISTS(pSettings, r_string, section, "script_ui_functor", "");
+
+	if (ScriptUIFunctor.size())
+	{
+		ScriptUIBone = pSettings->r_string(section, "script_ui_bone");
+
+		Fvector ScriptUIPos = pSettings->r_fvector3(section, "script_ui_position");
+		Fvector ScriptUIRot = pSettings->r_fvector3(section, "script_ui_rotation");
+
+		ScriptUIRot.mul(PI / 180.0f);
+		ScriptUIMatrix.setHPB(ScriptUIRot.x, ScriptUIRot.y, ScriptUIRot.z).translate_over(ScriptUIPos);
+	}
+
+	if (READ_IF_EXISTS(pSettings, r_bool, section, "torch_installed", false))
+	{
+		THudLightTorch& LightTorch = m_object->CreateComponent<THudLightTorch>();
+		LightTorch.NewTorchlight(section);
+	}
+
+	LoadSounds(section);
+}
+
+void CHudItem::LoadSounds(const char* section)
+{
+	m_eSoundsFlags.zero();
+	m_eSoundsFlags2.zero();
+
+	if (!HudDesc().m_bDisableBore && SoundExist(section, "snd_bore"))
+	{
+		m_sounds.LoadSound(section, "snd_bore", "sndBore", true);
+	}
+
+	if (SoundExist(section, "snd_switch_device"))
+	{
+		m_sounds.LoadSound(section, "snd_switch_device", "sndSwitchDevice", false);
+	}
+
+	if (SoundExist(section, "snd_headlamp_on"))
+	{
+		m_eSoundsFlags.set(ESoundsFlags::sf_headlamp, true);
+		m_sounds.LoadSound(section, "snd_headlamp_on", "sndHeadlampOn", false);
+		m_sounds.LoadSound(section, "snd_headlamp_off", "sndHeadlampOff", false);
+	}
+
+	if (SoundExist(section, "snd_nv_on"))
+	{
+		m_eSoundsFlags.set(ESoundsFlags::sf_nv, true);
+		m_sounds.LoadSound(section, "snd_nv_on", "sndNVOn", false);
+		m_sounds.LoadSound(section, "snd_nv_off", "sndNVOff", false);
+	}
+
+	if (SoundExist(section, "snd_gasmask"))
+	{
+		m_sounds.LoadSound(section, "snd_gasmask", "sndGasmask", false);
+	}
+
+	if (SoundExist(section, "snd_prepare_detector"))
+	{
+		m_eSoundsFlags.set(ESoundsFlags::sf_prepare_detector, true);
+		m_sounds.LoadSound(section, "snd_prepare_detector", "sndPrepareDet", false);
+	}
+
+	if (SoundExist(section, "snd_finish_detector"))
+	{
+		m_eSoundsFlags.set(ESoundsFlags::sf_finish_detector, true);
+		m_sounds.LoadSound(section, "snd_finish_detector", "sndFinishDet", false);
+	}
+
+	if (SoundExist(section, "snd_sprint_start"))
+	{
+		m_eSoundsFlags2.set(ESoundsFlags2::sf_sprint_start, true);
+		m_sounds.LoadSound(section, "snd_sprint_start", "sndSprintStart", false);
+	}
+
+	if (SoundExist(section, "snd_sprint_end"))
+	{
+		m_eSoundsFlags2.set(ESoundsFlags2::sf_sprint_end, true);
+		m_sounds.LoadSound(section, "snd_sprint_end", "sndSprintEnd", false);
+	}
+}
+
+void CHudItem::PlaySound(const char* alias, const Fvector& position, bool allowOverlap)
+{
+	m_sounds.PlaySound(alias, position, object().H_Root(), GetHUDSoundMode(), false, allowOverlap, m_started_rnd_anim_idx);
+}
+
+void CHudItem::renderable_Render()
+{
+	Fmatrix FinalItem;
+	if (g_player_hud && g_player_hud->HumanoidItemPose(this, FinalItem)) { return; }
+	UpdateXForm					();
+	bool _hud_render			= ::Render->get_HUD() && GetHUDSoundMode();
+	
+	if (!_hud_render || IsHidden())
+	{
+		if (!object().H_Parent() || (!_hud_render && !IsHidden()))
+		{
+			on_renderable_Render		();
+			debug_draw_firedeps			();
+		}
+		else if (m_object&&object().H_Parent())
+		{
+			if ((m_object->H_Parent()->cast_inventory_owner() && 
+				m_object->H_Parent()->cast_inventory_owner()->attached(m_object->cast_inventory_item())) 
+				||
+				(item().BaseSlot() == INV_SLOT_3 /*|| item().BaseSlot() == INV_SLOT_2*/))
+				on_renderable_Render();
+		}
+	}
+}
+
+void CHudItem::SwitchState(u8 S)
+{
+	if (OnClient()) 
+		return;
+
+	SetNextState( S );
+
+	if (object().Local() && !object().getDestroy())	
+	{
+		// !!! Just single entry for given state !!!
+		NET_Packet				P;
+		object().u_EventGen		(P,GE_WPN_STATE_CHANGE,object().ID());
+		P.w_u8					(S);
+		object().u_EventSend	(P);
+	}
+}
+
+void CHudItem::OnEvent(NET_Packet& P, u16 type)
+{
+	switch (type)
+	{
+	case GE_WPN_STATE_CHANGE:
+		{
+			u8				S;
+			P.r_u8			(S);
+			OnStateSwitch	(S);
+		}
+		break;
+	}
+}
+
+void CHudItem::OnStateSwitch(u8 S)
+{
+	u8 old_state = GetState();
+	SetState			(S);
+	
+	if(object().Remote()) 
+		SetNextState	(S);
+
+	switch (S)
+	{
+	case eShowing:
+	{
+		if (object().H_Parent() != nullptr && object().H_Parent() == Level().CurrentControlEntity())
+		{
+			if (g_player_hud->attached_item(1) != nullptr && g_player_hud->attached_item(1) != HudItemData())
+			{
+				CCustomDevice* dev = smart_cast<CCustomDevice*>(g_player_hud->attached_item(1)->m_parent_hud_item);
+				if (dev != nullptr && dev->CanDrawHand() && old_state != CMissile::EMissileStates::eThrowEnd)
+				{
+					dev->SwitchState(CCustomDevice::EDeviceStates::eHandDraw);
+				}
+			}
+		}
+		break;
+	}
+	case eHiding:
+	{
+		if (object().H_Parent() != nullptr && object().H_Parent() == Level().CurrentControlEntity())
+		{
+			if (g_player_hud->attached_item(1) != nullptr && g_player_hud->attached_item(1) != HudItemData())
+			{
+				CCustomDevice* dev = smart_cast<CCustomDevice*>(g_player_hud->attached_item(1)->m_parent_hud_item);
+				if (dev != nullptr && dev->CanHideHand())
+				{
+					dev->SwitchState(CCustomDevice::EDeviceStates::eHandHide);
+				}
+			}
+		}
+		break;
+	}
+	case eBore:
+	{
+		switch2_Bore();
+		break;
+	}
+	case eSprintStart:
+	{
+		PlayHUDMotion(SetCurrentStateAnimation("anm_idle_sprint_start"), EHudMixType::eMixAll, eSprintStart);
+		if (m_eSoundsFlags2.test(ESoundsFlags2::sf_sprint_start))
+		{
+			PlaySound("sndSprintStart", m_object->Position());
+		}
+		break;
+	}
+	case eSprintEnd:
+	{
+		PlayHUDMotion(SetCurrentStateAnimation("anm_idle_sprint_end"), EHudMixType::eMixAll, eSprintEnd);
+		if (m_eSoundsFlags2.test(ESoundsFlags2::sf_sprint_end))
+		{
+			PlaySound("sndSprintEnd", m_object->Position());
+		}
+		break;
+	}
+	case eDeviceSwitch:
+	{
+		PlayAnimDeviceSwitch();
+		break;
+	}
+	case ePrepareDetector:
+	{
+		SetPending(true);
+		PlayHUDMotion(SetCurrentStateAnimation("anm_prepare_detector"), EHudMixType::eMixAll, ePrepareDetector);
+
+		if (m_eSoundsFlags.test(ESoundsFlags::sf_prepare_detector))
+		{
+			PlaySound("sndPrepareDet", m_object->Position());
+		}
+		break;
+	}
+	case eFinishDetector:
+	{
+		SetPending(true);
+		PlayHUDMotion(SetCurrentStateAnimation("anm_finish_detector"), EHudMixType::eMixAll, eFinishDetector);
+
+		if (m_eSoundsFlags.test(ESoundsFlags::sf_finish_detector))
+		{
+			PlaySound("sndFinishDet", m_object->Position());
+		}
+		break;
+	}
+	};
+
+	if (S != eIdle && S != eSprintStart && S != eSprintEnd)
+	{
+		m_bSwitchSprint = false;
+	}
+
+	if (object().H_Parent() != nullptr && object().H_Parent()->cast_actor() != nullptr)
+	{
+		g_player_hud->UpdateMovementLayers();
+	}
+}
+
+void CHudItem::switch2_Bore()
+{
+	SetPending(false);
+	PlayAnimBore();
+
+	const CObject* root = object().H_Root();
+	PlaySound("sndBore", root->Position());
+}
+
+void CHudItem::OnAnimationEnd(u8 state)
+{
+	if (CActor* pActor = m_object&&m_object->H_Parent() ? m_object->H_Parent()->cast_actor() : NULL)
+	{
+		pActor->callback(GameObject::eActorHudAnimationEnd)(smart_cast<CGameObject*>(this)->lua_game_object(), hud_sect.c_str(), m_current_motion.c_str(), state, animation_slot());
+	}
+
+	switch(state)
+	{
+	case eSprintStart:
+	case eSprintEnd:
+	case eBore:
+	case eDeviceSwitch:
+	case eFinishDetector:
+	{
+		SwitchState(eIdle);
+		break;
+	}
+	case ePrepareDetector:
+	{
+		SwitchState(eIdle);
+		break;
+	}
+	};
+}
+
+void CHudItem::PlayAnimBore()
+{
+	PlayHUDMotion(SetCurrentStateAnimation("anm_bore"), SetCurrentStateAnimation("anm_playing"), EHudMixType::eMixAll, GetState());
+}
+
+bool CHudItem::ActivateItem() 
+{
+	OnActiveItem	();
+	return			true;
+}
+
+void CHudItem::DeactivateItem() 
+{
+	OnHiddenItem();
+}
+
+void CHudItem::OnMoveToRuck(const SInvItemPlace& prev)
+{
+	SwitchState(eHidden);
+
+	if (THudLightTorch* LightTorch = m_object->GetComponent<THudLightTorch>())
+	{
+		LightTorch->UpdateTorchFromObject(this);
+	}
+
+	if (HudItemData() != nullptr && object().H_Parent() != nullptr && object().H_Parent() == Level().CurrentEntity())
+	{
+		g_player_hud->detach_item(this);
+	}
+}
+
+bool CHudItem::SendDeactivateItem(bool Force)
+{
+	if (GetNextState() == eHiding)
+		return false;
+
+	SendHiddenItem();
+
+	return true;
+}
+
+void CHudItem::SendHiddenItem()
+{
+	if (!object().getDestroy())
+	{
+		NET_Packet				P;
+		object().u_EventGen		(P,GE_WPN_STATE_CHANGE,object().ID());
+		P.w_u8					(eHiding);
+		object().u_EventSend	(P, net_flags(true, true, false, true));
+		SetPending(true);
+		SetNextState(eHiding);
+	}
+}
+
+void CHudItem::UpdateHudAdditonal(Fmatrix& trans)
+{
+	CActor* pActor = Level().CurrentControlEntity() != nullptr ? Level().CurrentControlEntity()->cast_actor() : nullptr;
+	if (pActor == nullptr)
+		return;
+
+	const float dt = Device.fTimeDelta;
+
+	const float fYawTarget = -pActor->fFPCamYawMagnitude * lerp(HudDesc().BaseYPRParams.m_fHudYawInertiaK, HudDesc().ZoomYPRParams.m_fHudYawInertiaK, GetAimFactor());
+	const float fPitchTarget = -pActor->fFPCamPitchMagnitude * lerp(HudDesc().BaseYPRParams.m_fHudPitchInertiaK, HudDesc().ZoomYPRParams.m_fHudPitchInertiaK, GetAimFactor());
+	const float fRollTarget = -pActor->fFPCamYawMagnitude * lerp(HudDesc().BaseYPRParams.m_fHudRollInertiaK, HudDesc().ZoomYPRParams.m_fHudRollInertiaK, GetAimFactor());
+
+	const float fSpeed = lerp(HudDesc().BaseYPRParams.m_fHudInertiaSpeed, HudDesc().ZoomYPRParams.m_fHudInertiaSpeed, GetAimFactor());
+	Fvector inertia = { m_fHudYawInertia, m_fHudPitchInertia, m_fHudRollInertia };
+	const attachable_hud_item* hi = HudItemData();
+	const float fMassSpeed = fSpeed * CCameraRig::MassSpeed(hi != nullptr ? hi->m_hud_mass : 1.f);
+	if (CCameraRig::SpringSway(inertia, m_vHudInertiaVelocity, Fvector{ fYawTarget, fPitchTarget, fRollTarget }, fMassSpeed))
+	{
+		m_fHudYawInertia = inertia.x;
+		m_fHudPitchInertia = inertia.y;
+		m_fHudRollInertia = inertia.z;
+	}
+	else
+	{
+		const float fLerp = 1.0f - exp(-dt * fSpeed);
+		m_fHudYawInertia += (fYawTarget - m_fHudYawInertia) * fLerp;
+		m_fHudPitchInertia += (fPitchTarget - m_fHudPitchInertia) * fLerp;
+		m_fHudRollInertia += (fRollTarget - m_fHudRollInertia) * fLerp;
+	}
+
+	Fmatrix hud_inertia;
+	hud_inertia.identity();
+	hud_inertia.rotateY(m_fHudYawInertia);
+
+	Fmatrix hud_inertia_p;
+	hud_inertia_p.identity();
+	hud_inertia_p.rotateX(m_fHudPitchInertia);
+	hud_inertia.mulA_43(hud_inertia_p);
+
+	Fmatrix hud_inertia_r;
+	hud_inertia_r.identity();
+	hud_inertia_r.rotateZ(m_fHudRollInertia);
+	hud_inertia.mulA_43(hud_inertia_r);
+
+	m_HudLookInertiaPre.set(trans);
+	m_HudLookInertia.set(hud_inertia);
+	m_HudLookInertiaFrame = Device.dwFrame;
+	trans.mulB_43(hud_inertia);
+}
+
+bool CHudItem::GetHudLookInertia(Fmatrix& pre, Fmatrix& xform) const
+{
+	if (m_HudLookInertiaFrame != Device.dwFrame)
+	{
+		return false;
+	}
+
+	pre.set(m_HudLookInertiaPre);
+	xform.set(m_HudLookInertia);
+	return true;
+}
+
+void CHudItem::UpdateCL()
+{
+	if (m_current_motion_def)
+	{
+		if (m_bStopAtEndAnimIsRunning)
+		{
+			const xr_vector<motion_marks>& marks = m_current_motion_def->marks;
+			if (GetState() != eHidden && !marks.empty())
+			{
+				float motion_prev_time = ((float)m_dwMotionCurrTm - (float)m_dwMotionStartTm) / 1000.0f;
+				float motion_curr_time = ((float)Device.dwTimeGlobal - (float)m_dwMotionStartTm) / 1000.0f;
+
+				for (auto& M : marks)
+				{
+					if (M.is_empty())
+					{
+						continue;
+					}
+
+					auto Iprev = M.pick_mark(motion_prev_time);
+					auto Icurr = M.pick_mark(motion_curr_time);
+					if (Iprev == nullptr && Icurr != nullptr)
+					{
+						OnMotionMark(m_startedMotionState, M);
+					}
+				}
+			}
+
+			m_dwMotionCurrTm = Device.dwTimeGlobal;
+			if (m_dwMotionCurrTm > m_dwMotionEndTm)
+			{
+				m_current_motion_def = nullptr;
+				m_dwMotionStartTm = 0;
+				m_dwMotionEndTm = 0;
+				m_dwMotionCurrTm = 0;
+				m_bStopAtEndAnimIsRunning = false;
+				if (GetState() != eHidden)
+				{
+					OnAnimationEnd(m_startedMotionState);
+				}
+			}
+		}
+	}
+
+	if (THudLightTorch* LightTorch = m_object->GetComponent<THudLightTorch>())
+	{
+		LightTorch->UpdateTorchFromObject(this);
+	}
+
+	if (ScriptWindow)
+	{
+		ScriptWindow->Update();
+	}
+}
+
+void CHudItem::OnH_A_Chield		()
+{}
+
+void CHudItem::OnH_B_Chield		()
+{
+	StopCurrentAnimWithoutCallback();
+}
+
+void CHudItem::OnH_B_Independent	(bool just_before_destroy)
+{
+	m_sounds.StopAllSounds	();
+	UpdateXForm				();
+
+	if (THudLightTorch* LightTorch = m_object->GetComponent<THudLightTorch>())
+	{
+		LightTorch->UpdateTorchFromObject(this);
+	}
+
+	if (HudItemData() != nullptr && object().H_Parent() != nullptr && object().H_Parent() == Level().CurrentEntity())
+	{
+		g_player_hud->detach_item(this);
+	}
+}
+
+void CHudItem::OnH_A_Independent()
+{
+	if (HudItemData() != nullptr && object().H_Parent() != nullptr && object().H_Parent() == Level().CurrentEntity())
+	{
+		g_player_hud->detach_item(this);
+	}
+
+	StopCurrentAnimWithoutCallback();
+}
+
+void CHudItem::on_b_hud_detach()
+{
+	m_sounds.StopAllSounds	();
+}
+
+void CHudItem::on_a_hud_attach()
+{
+	if (m_current_motion_def)
+	{
+		PlayHUDMotion_noCB(m_current_motion, EHudMixType::eNoMix, false);
+	}
+
+	m_eAnimationsFlags.set(EAnimationsFlags::af_torch, HudAnimationExist("anm_switch_device"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_nvg, m_eAnimationsFlags.test(EAnimationsFlags::af_torch));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_clear_mask, HudAnimationExist("anm_gasmask"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_prepare_detector, HudAnimationExist("anm_prepare_detector"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_finish_detector, HudAnimationExist("anm_finish_detector"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_draw, HudAnimationExist("anm_hand_draw"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_hide, HudAnimationExist("anm_hand_hide"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_throw_start, HudAnimationExist("anm_hand_throw_start"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_throw_idle, HudAnimationExist("anm_hand_throw_idle"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_throw_end, HudAnimationExist("anm_hand_throw_end"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_kick, HudAnimationExist("anm_kick") && HudAnimationExist("anm_kick2"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_lam, HudAnimationExist("anm_lam"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_bore, HudAnimationExist("anm_bore") || HudAnimationExist("anm_playing"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_firemode, (HudAnimationExist("anm_firemode") || HudAnimationExist("anm_changefiremode_from_1_to_a") || HudAnimationExist("anm_changefiremode_from_a_to_1")));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_empty_click, HudAnimationExist("anm_empty_click"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_aim_in_out, (HudAnimationExist("anm_idle_aim_start") && HudAnimationExist("anm_idle_aim_end")));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_sprint_in_out, (HudAnimationExist("anm_idle_sprint_start") && HudAnimationExist("anm_idle_sprint_end")));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_kick, HudAnimationExist("anm_kick"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_mag_check, HudAnimationExist("anm_magazine_inspect"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_firemode_check, HudAnimationExist("anm_firemode_inspect"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_chamber_load, HudAnimationExist("anm_chamber_load"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_chamber_unload, HudAnimationExist("anm_chamber_unload"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_chamber_check, HudAnimationExist("anm_chamber_check"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_sprint, HudAnimationExist("anm_idle_sprint"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_moving, HudAnimationExist("anm_idle_moving"));
+
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_dry, HudAnimationExist("anm_hand_dry"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_shoot, HudAnimationExist("anm_hand_shoot"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_jammed, HudAnimationExist("anm_hand_jammed"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_lightmis, HudAnimationExist("anm_hand_lightmisfire"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_det_hand_firemode, HudAnimationExist("anm_hand_firemode"));
+	m_eAnimationsFlags.set(EAnimationsFlags::af_safemode_in_out, HudAnimationExist("anm_safemode_in") && HudAnimationExist("anm_safemode_out"));
+
+	m_eAnimationsFlags.set(EAnimationsFlags::af_alt_kick, HudAnimationExist("anm_attack_alt") && HudAnimationExist("anm_attack2_alt"));
+
+	m_eBonePartAnimationsFlags.set(EBPAnimsFlags::abpf_idle, HudAnimationExist("anm_bp_idle"));
+	m_eBonePartAnimationsFlags.set(EBPAnimsFlags::abpf_idle_empty, HudAnimationExist("anm_bp_idle_empty"));
+	m_eBonePartAnimationsFlags.set(EBPAnimsFlags::abpf_idle_jammed, HudAnimationExist("anm_bp_idle_jammed"));
+	m_eBonePartAnimationsFlags.set(EBPAnimsFlags::abpf_firemode, (HudAnimationExist("anm_bp_firemode_state_auto") || HudAnimationExist("anm_bp_firemode_state_1")));
+
+	if (ScriptUIFunctor.size() && !ScriptWindow)
+	{
+		luabind::functor<CUIDialogWndEx*> funct;
+		if (ai().script_engine().functor(*ScriptUIFunctor, funct))
+		{
+			if (CUIDialogWndEx* ScriptWnd = funct())
+			{
+				ScriptWindow = ScriptWnd;
+			}
+		}
+	}
+}
+
+bool CHudItem::HudAnimationExist(const shared_str& anim_name, bool only_for_actor)
+{
+	if (OnClient())
+	{
+		if (Level().CurrentControlEntity() != object().H_Parent() && only_for_actor)
+		{
+			return false;
+		}
+	}
+
+	if (auto HID = HudItemData())
+	{
+		return HID->m_hand_motions.has_motion(anim_name);
+	}
+	else
+	{
+		bool res = g_player_hud->motion_length(anim_name, HudSection(), m_current_motion_def) != -1;
+		m_current_motion_def = nullptr;
+		return res;
+	}
+}
+
+u32 CHudItem::PlayHUDMotion(const shared_str& M, const shared_str& M2, EHudMixType bMixIn, u8 state, bool disableRandom)
+{
+    if (HudAnimationExist(M2.c_str(), false))
+    {
+        return PlayHUDMotion(M2, bMixIn, state, disableRandom);
+    }
+
+    return PlayHUDMotion(M, bMixIn, state, disableRandom);
+}
+
+u32 CHudItem::PlayHUDMotion(const shared_str& M, EHudMixType bMixIn, u8 state, bool disableRandom)
+{
+	if (HudItemData() && !HudAnimationExist(M.c_str()))
+	{
+		Msg("! model [%s] has no motion alias defined [%s]", hud_sect.c_str(), M.c_str());
+		return 0;
+	}
+
+	shared_str snd;
+	snd.printf("snd_%s", *M);
+	if (m_object->H_Parent() != nullptr && pSettings->line_exist(HudSection(), snd))
+	{
+		m_sounds.LoadSound(*HudSection(), *snd, "sndByMotion", false);
+		PlaySound("sndByMotion", m_object->Position());
+	}
+
+	u32 anim_time = PlayHUDMotion_noCB(M.c_str(), bMixIn, disableRandom);
+	if (anim_time>0)
+	{
+		m_bStopAtEndAnimIsRunning	= true;
+		m_dwMotionStartTm			= Device.dwTimeGlobal;
+		m_dwMotionCurrTm			= m_dwMotionStartTm;
+		m_dwMotionEndTm				= m_dwMotionStartTm + anim_time;
+		m_startedMotionState		= state;
+	}else
+		m_bStopAtEndAnimIsRunning	= false;
+
+	return anim_time;
+}
+
+bool CHudItem::AddSuffixName(shared_str& anim, const char* suffix, const char* test_suffix)
+{
+	string128 new_name = {};
+	xr_strconcat(new_name, anim.c_str(), suffix, test_suffix);
+
+	if (HudAnimationExist(new_name, !m_disable_random_animations))
+	{
+		anim = new_name;
+		return true;
+	}
+
+	return false;
+}
+
+u32 CHudItem::PlayHUDMotion_noCB(const shared_str& motion_name, EHudMixType bMixIn, bool disableRandom)
+{
+	m_current_motion					= motion_name;
+
+	if(bDebug && item().m_pInventory)
+	{
+		Msg("-[%s] as[%d] [%d]anim_play [%s][%d]",
+			HudItemData()?"HUD":"Simulating", 
+			item().m_pInventory->GetActiveSlot(), 
+			item().object_id(),
+			motion_name.c_str(), 
+			Device.dwFrame);
+	}
+
+	if (HudItemData())
+	{
+		if (g_player_hud != nullptr && HudItemData() == g_player_hud->attached_item(0))
+		{
+			g_player_hud->OnHudMotionStarted(motion_name);
+		}
+
+		return HudItemData()->anim_play(motion_name, bMixIn, m_current_motion_def, m_started_rnd_anim_idx, disableRandom);
+	}
+	else
+	{
+		m_started_rnd_anim_idx = 0;
+		return g_player_hud->motion_length(motion_name, HudSection(), m_current_motion_def);
+	}
+}
+
+void CHudItem::StopCurrentAnimWithoutCallback()
+{
+	m_dwMotionStartTm			= 0;
+	m_dwMotionEndTm				= 0;
+	m_dwMotionCurrTm			= 0;
+	m_bStopAtEndAnimIsRunning	= false;
+	m_current_motion_def		= nullptr;
+}
+
+bool CHudItem::GetHUDmode()
+{
+	if (m_object && m_object->H_Parent()) {
+		CActor* A = m_object->H_Parent()->cast_actor();
+		return (A && A->HUDview());
+	}
+		
+	return false;
+}
+
+bool CHudItem::GetHUDSoundMode()
+{
+	if (m_object && m_object->H_Parent()) {
+		CActor* A = m_object->H_Parent()->cast_actor();
+		return (A && A->HUDview()) || HudItemData();
+	} 
+
+	return false;
+}
+
+void CHudItem::PlayAnimIdle()
+{
+	if (TryPlayAnimIdle())
+	{
+		return;
+	}
+
+	PlayHUDMotion(SetCurrentIdleAnimation(), EHudMixType::eMixAll, GetState(), m_disable_random_animations);
+}
+
+shared_str CHudItem::SetCurrentIdleAnimation()
+{
+	shared_str new_name = "anm_idle";
+	if (Level().CurrentControlEntity() == nullptr)
+		return new_name;
+
+	CActor* pActor = Level().CurrentControlEntity()->cast_actor();
+
+	if (pActor && pActor == object().H_Parent())
+	{
+		u32 state = pActor->GetMovementState(ACTOR_DEFS::EMovementStates::eReal);
+
+		if (state & ACTOR_DEFS::EMoveCommand::mcAccel && state & ACTOR_DEFS::EMoveCommand::mcCrouch)
+		{
+			AddSuffixName(new_name, "_crouch_slow");
+		}
+		else if (state & ACTOR_DEFS::EMoveCommand::mcAccel)
+		{
+			AddSuffixName(new_name, "_slow");
+		}
+		else if (state & ACTOR_DEFS::EMoveCommand::mcCrouch)
+		{
+			AddSuffixName(new_name, "_crouch");
+		}
+	}
+
+	return new_name;
+}
+
+bool CHudItem::TryPlayAnimIdle()
+{
+	if (MovingAnimAllowedNow())
+	{
+		if (CActor* pActor = object().H_Parent() != nullptr ? object().H_Parent()->cast_actor() : nullptr)
+		{
+			u32 state = pActor->GetMovementState(eReal);
+			if (state & ACTOR_DEFS::EMoveCommand::mcSprint)
+			{
+				if (GetNextState() == eSprintStart)
+				{
+					return true;
+				}
+
+				if (!m_bSwitchSprint && m_eAnimationsFlags.test(EAnimationsFlags::af_sprint_in_out))
+				{
+					m_bSwitchSprint = true;
+					SwitchState(eSprintStart);
+
+					if (HudItemData() && g_player_hud->attached_item(1) && g_player_hud->attached_item(1)->m_parent_hud_item != this)
+					{
+						if (GetHUDmode())
+						{
+							CActor* pActor = object().H_Parent() != nullptr ? object().H_Parent()->cast_actor() : nullptr;
+							if (CCustomDevice* pDevice = pActor ? pActor->GetDevice() : nullptr)
+							{
+								if (!pDevice->m_bSwitchSprint)
+								{
+									pDevice->m_bSwitchSprint = true;
+									pDevice->SwitchState(eSprintStart);
+								}
+							}
+						}
+					}
+
+					if (HudItemData() && g_player_hud->attached_item(0) && g_player_hud->attached_item(0)->m_parent_hud_item != this)
+					{
+						if (GetHUDmode())
+						{
+							if (CHudItem* pHudItem = g_player_hud->attached_item(0)->m_parent_hud_item)
+							{
+								const u8 NextState = pHudItem->GetNextState();
+								bool CanSprint = NextState == eIdle || NextState == eShowing || NextState == eSprintEnd || NextState == eBore;
+								if (!pHudItem->m_bSwitchSprint && CanSprint)
+								{
+									pHudItem->m_bSwitchSprint = true;
+									pHudItem->SwitchState(eSprintStart);
+								}
+							}
+						}
+					}
+
+					return true;
+				}
+
+				if (m_eAnimationsFlags.test(EAnimationsFlags::af_sprint))
+				{
+					PlayAnimIdleSprint();
+					return true;
+				}
+				return false;
+			}
+			else if (m_bSwitchSprint && m_eAnimationsFlags.test(EAnimationsFlags::af_sprint_in_out))
+			{
+				m_bSwitchSprint = false;
+				SwitchState(eSprintEnd);
+				return true;
+			}
+			else if (state & ACTOR_DEFS::EMoveCommand::mcAnyMove)
+			{
+				if (state & ACTOR_DEFS::EMoveCommand::mcCrouch && (HudAnimationExist("anm_idle_moving_crouch_slow") || HudAnimationExist("anm_idle_moving_crouch")))
+				{
+					if (state & ACTOR_DEFS::EMoveCommand::mcAccel && HudAnimationExist("anm_idle_moving_crouch_slow"))
+					{
+						PlayAnimIdleMovingCrouchSlow();
+					}
+					else
+					{
+						PlayAnimIdleMovingCrouch();
+					}
+
+					return true;
+				}
+				else
+				{
+					if (state & ACTOR_DEFS::EMoveCommand::mcAccel && HudAnimationExist("anm_idle_moving_slow"))
+					{
+						PlayAnimIdleMovingSlow();
+					}
+					else if (m_eAnimationsFlags.test(EAnimationsFlags::af_moving))
+					{
+						PlayAnimIdleMoving();
+					}
+					else
+					{
+						return false;
+					}
+
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+void CHudItem::PlayAnimIdleMoving()
+{
+	PlayHUDMotion(SetCurrentStateAnimation("anm_idle_moving"), EHudMixType::eMixAll, GetState(), m_disable_random_animations);
+}
+
+void CHudItem::PlayAnimIdleMovingSlow()
+{
+	PlayHUDMotion(SetCurrentStateAnimation("anm_idle_moving_slow"), EHudMixType::eMixAll, GetState());
+}
+
+void CHudItem::PlayAnimIdleMovingCrouch()
+{
+	PlayHUDMotion(SetCurrentStateAnimation("anm_idle_moving_crouch"), EHudMixType::eMixAll, GetState());
+}
+
+void CHudItem::PlayAnimIdleMovingCrouchSlow()
+{
+	PlayHUDMotion(SetCurrentStateAnimation("anm_idle_moving_crouch_slow"), EHudMixType::eMixAll, GetState());
+}
+
+void CHudItem::PlayAnimIdleSprint()
+{
+	PlayHUDMotion(SetCurrentStateAnimation("anm_idle_sprint"), EHudMixType::eMixAll, GetState(), m_disable_random_animations);
+}
+
+void CHudItem::PlayAnimDeviceSwitch()
+{
+	SetPending(true);
+	shared_str anim_name;
+	shared_str sound_name;
+
+	if (m_eDevicesFlags.test(EDevicesFlags::df_torch))
+	{
+		anim_name = SetCurrentStateAnimation("anm_switch_device");
+
+		if (m_eSoundsFlags.test(ESoundsFlags::sf_headlamp))
+		{
+			if (CActor* pActor = m_object->H_Parent() ? m_object->H_Parent()->cast_actor() : nullptr)
+			{
+				if (CTorch* pTorch = smart_cast<CTorch*>(pActor->inventory().ItemFromSlot(TORCH_SLOT)))
+				{
+					sound_name = pTorch->IsSwitched() ? "sndHeadlampOff" : "sndHeadlampOn";
+				}
+			}
+		}
+		else
+		{
+			sound_name = "sndSwitchDevice";
+		}
+	}
+	else if (m_eDevicesFlags.test(EDevicesFlags::df_nvg))
+	{
+		anim_name = SetCurrentStateAnimation("anm_switch_device");
+
+		if (m_eSoundsFlags.test(ESoundsFlags::sf_nv))
+		{
+			if (CActor* pActor = m_object->H_Parent() ? m_object->H_Parent()->cast_actor() : nullptr)
+			{
+				if (pActor->GetNightVisionEffector() != nullptr)
+				{
+					sound_name = pActor->GetNightVisionEffector()->GetStatus() ? "sndNVOff" : "sndNVOn";
+				}
+			}
+		}
+		else
+		{
+			sound_name = "sndSwitchDevice";
+		}
+	}
+	else if (m_eDevicesFlags.test(EDevicesFlags::df_clear_mask))
+	{
+		anim_name = SetCurrentStateAnimation("anm_gasmask");
+		sound_name = "sndGasmask";
+	}
+
+	if (g_player_hud->attached_item(0) == nullptr && g_player_hud->attached_item(1) != nullptr || g_player_hud->attached_item(0) != nullptr && g_player_hud->attached_item(0) == HudItemData())
+	{
+		PlaySound(*sound_name, m_object->Position());
+	}
+
+	PlayHUDMotion(anim_name, EHudMixType::eMixAll, eDeviceSwitch);
+}
+
+void CHudItem::OnMovementChanged(ACTOR_DEFS::EMoveCommand cmd)
+{
+	if (GetNextState() == eIdle)
+	{
+		if (!m_bStopAtEndAnimIsRunning)
+		{
+			PlayAnimIdle();
+			ResetSubStateTime();
+		}
+	}
+	else if (!IsZoomed() && GetNextState() != eHiding)
+	{
+		if ((cmd & ACTOR_DEFS::EMoveCommand::mcSprint) != 0 && (GetNextState() == eSprintEnd || !IsPending() && GetState() == GetNextState()))
+		{
+			m_bSwitchSprint = true;
+			SwitchState(eSprintStart);
+
+			if (HudItemData() && g_player_hud->attached_item(1) && g_player_hud->attached_item(1)->m_parent_hud_item != this)
+			{
+				if (GetHUDmode())
+				{
+					CActor* pActor = object().H_Parent() != nullptr ? object().H_Parent()->cast_actor() : nullptr;
+					if (CCustomDevice* pDevice = pActor ? pActor->GetDevice() : nullptr)
+					{
+						if (!pDevice->m_bSwitchSprint)
+						{
+							pDevice->m_bSwitchSprint = true;
+							pDevice->SwitchState(eSprintStart);
+						}
+					}
+				}
+			}
+
+            if (HudItemData() && g_player_hud->attached_item(0) && g_player_hud->attached_item(0)->m_parent_hud_item != this)
+			{
+				if (GetHUDmode())
+				{
+					if (CHudItem* pHudItem = g_player_hud->attached_item(0)->m_parent_hud_item)
+					{
+						const u8 NextState = pHudItem->GetNextState();
+						const u8 State = pHudItem->GetNextState();
+						bool CanSprint = NextState == eIdle || NextState == eShowing || NextState == eSprintEnd || NextState == eBore || NextState == State && !pHudItem->IsPending();
+						if (!pHudItem->m_bSwitchSprint && CanSprint)
+						{
+							pHudItem->m_bSwitchSprint = true;
+							pHudItem->SwitchState(eSprintStart);
+						}
+					}
+				}
+			}
+		}
+		else if ((cmd & ACTOR_DEFS::EMoveCommand::mcSprint) == 0 && GetNextState() == eSprintStart)
+		{
+			m_bSwitchSprint = false;
+			SwitchState(eSprintEnd);
+		}
+	}
+}
+
+attachable_hud_item* CHudItem::HudItemData()
+{
+	attachable_hud_item* hi = nullptr;
+	if(!g_player_hud)		
+		return				hi;
+
+	hi = g_player_hud->attached_item(0);
+	if (hi && hi->m_parent_hud_item == this)
+		return hi;
+
+	hi = g_player_hud->attached_item(1);
+	if (hi && hi->m_parent_hud_item == this)
+		return hi;
+
+	return nullptr;
+}
+
+float CHudItem::GetHudFov()
+{
+	return BodycamNative::HudFov(this, (HudDesc().m_fHudFov ? HudDesc().m_fHudFov : psHUD_FOV_def) * HudDesc().m_fHudFovFactor);
+}
+
+void CHudItem::PlaySoundIfExist(const char* alias, const Fvector& position, bool allowOverlap)
+{
+	HUD_SOUND_ITEM* SndIter = m_sounds.FindSoundItem(alias, false);
+	if (SndIter != nullptr)
+	{
+		m_sounds.PlaySound(SndIter, position, object().H_Root(), GetHUDSoundMode(), false, allowOverlap, u8(-1));
+	}
+}
+
+void CHudItem::SetModelBoneStatus(const char* bone, bool show)
+{
+	if (HudItemData())
+	{
+		HudItemData()->set_bone_visible(bone, show, true);
+	}
+
+	if (IKinematics* pWeaponVisual = m_object ? m_object->Visual()->dcast_PKinematics() : NULL)
+	{
+		if (auto BoneID = pWeaponVisual->LL_BoneID(bone); BoneID != BI_NONE)
+		{
+			pWeaponVisual->LL_SetBoneVisible(BoneID, show, false);
+		}
+	}
+}
+
+void CHudItem::SetMultipleBonesStatus(const char* section, const char* line, bool show)
+{
+	if (!pSettings->section_exist(section))
+	{
+		return;
+	}
+
+	if (pSettings->line_exist(section, line))
+	{
+		const char*	S = pSettings->r_string(section, line);
+		if (S && S[0])
+		{
+			string128 _Item = {};
+			int count = _GetItemCount(S);
+			for (int it = 0; it < count; ++it)
+			{
+				_GetItem(S, it, _Item);
+				SetModelBoneStatus(_Item, show);
+			}
+		}
+	}
+}
+
+void CHudItem::OnMotionMark(u8 state, const motion_marks& mark)
+{
+	if (state == eDeviceSwitch)
+	{
+		if (g_player_hud->attached_item(1) != nullptr && g_player_hud->attached_item(1) == HudItemData() && g_player_hud->attached_item(0) != nullptr)
+		{
+			m_eDevicesFlags.zero();
+		}
+
+		if (mark.name == "Right")
+		{
+			if (m_eDevicesFlags.test(EDevicesFlags::df_nvg))
+			{
+				if (CActor* pActor = m_object->H_Parent() ? m_object->H_Parent()->cast_actor() : nullptr)
+				{
+					pActor->StartNVPPE();
+				}
+			}
+		}
+
+		if (mark.name == "Left")
+		{
+			if (m_eDevicesFlags.test(EDevicesFlags::df_torch))
+			{
+				if (CActor* pActor = m_object->H_Parent() ? m_object->H_Parent()->cast_actor() : nullptr)
+				{
+					PIItem item_from_slot = pActor->inventory().ItemFromSlot(TORCH_SLOT);
+					if (CTorch* pTorch = item_from_slot != nullptr ? item_from_slot->cast_torch() : nullptr)
+					{
+						pTorch->Switch();
+					}
+				}
+			}
+			else if (m_eDevicesFlags.test(EDevicesFlags::df_nvg))
+			{
+				if (CActor* pActor = m_object->H_Parent() ? m_object->H_Parent()->cast_actor() : nullptr)
+				{
+					if (pActor->GetNightVisionEffector() != nullptr)
+					{
+						pActor->GetNightVisionEffector()->SwitchNightVision();
+					}
+				}
+			}
+			else if (m_eDevicesFlags.test(EDevicesFlags::df_clear_mask))
+			{
+				if (CActor* pActor = m_object->H_Parent() ? m_object->H_Parent()->cast_actor() : nullptr)
+				{
+					pActor->ClearMaskCB();
+				}
+			}
+
+			m_eDevicesFlags.zero();
+		}
+	}
+
+	if (state == ePrepareDetector && mark.name == "Left")
+	{
+		if (CActor* pActor = m_object && m_object->H_Parent() ? m_object->H_Parent()->cast_actor() : nullptr)
+		{
+			if (CCustomDevice* dev = pActor->GetDevice(true))
+			{
+				dev->SwitchState(eShowing);
+				dev->TurnDetectorInternal(true);
+			}
+		}
+	}
+
+	if (mark.name == "mm_unpend")
+	{
+		SetPending(false);
+	}
+
+	if (g_player_hud != nullptr)
+	{
+		g_player_hud->OnHudMotionMark(HudItemData(), mark.name);
+	}
+}
+
+bool CHudItem::SoundExist(const char* section, const char* sound_name)
+{
+	if (!pSettings->line_exist(section, sound_name))
+	{
+		return false;
+	}
+
+	const char* str = pSettings->r_string(section, sound_name);
+	if (str == nullptr || xr_strlen(str) == 0)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool CHudItem::CanStartAction(CActor* pActor)
+{
+	if (pActor == nullptr)
+	{
+		return true;
+	}
+
+	if (CCustomDevice* pDevice = pActor->GetDevice())
+	{
+		u8 state = pDevice->GetNextState();
+		if (state != CCustomDevice::eIdle && state != CCustomDevice::EDeviceStates::eHandAimStart && state != CCustomDevice::EDeviceStates::eHandAimEnd && !pDevice->IsHidden() || pDevice->NeedActivation())
+		{
+			return false;
+		}
+	}
+
+	const static bool isDelayedWeaponActions = EngineExternal()[EEngineExternalGame::EnableDelayedWeaponActions];
+
+	if (!isDelayedWeaponActions)
+	{
+		return true;
+	}
+
+	if (pActor->GetMovementState(ACTOR_DEFS::EMovementStates::eReal) & ACTOR_DEFS::EMoveCommand::mcSprint || m_bSwitchSprint)
+	{
+		return false;
+	}
+
+	if (IsPending())
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool CHudItem::SetKeyRepeatFlag(u32 kfACTTYPE)
+{
+	CActor* pActor = object().H_Parent() != nullptr ? object().H_Parent()->cast_actor() : nullptr;
+	if (pActor == nullptr)
+	{
+		return true;
+	}
+
+	bool result = CanStartAction(pActor);
+	if (!result)
+	{
+		CCustomDevice* pDevice = pActor->GetDevice();
+
+		const static bool isDelayedWeaponActions = EngineExternal()[EEngineExternalGame::EnableDelayedWeaponActions];
+
+		if ((isDelayedWeaponActions || m_eAnimationsFlags.test(EAnimationsFlags::af_aim_in_out) && (kfACTTYPE & kfUNZOOM) != 0) && (Actor()->GetMovementState(eReal) & ACTOR_DEFS::EMoveCommand::mcSprint || m_bSwitchSprint)
+		|| pDevice != nullptr && (pDevice->GetState() != CCustomDevice::eIdle && pDevice->GetState() != CCustomDevice::EDeviceStates::eHandAimStart && pDevice->GetState() != CCustomDevice::EDeviceStates::eHandAimEnd
+		&& !pDevice->IsHidden() || pDevice->NeedActivation()) && ((kfACTTYPE & kfRELOAD) != 0 || (kfACTTYPE & kfNEXTAMMO) != 0))
+		{
+			Actor()->SetActorKeyRepeatFlag((ACTOR_DEFS::EActorKeyflags)kfACTTYPE, true);
+		}
+	}
+
+	return result;
+}
+
+void CHudItem::PlayBonePartAnim(const shared_str& anim, bool bMixIn)
+{
+	if (attachable_hud_item* hid = HudItemData())
+	{
+		hid->anim_play_bonepart(anim, bMixIn);
+	}
+}
+
+bool CHudItem::NeedMovementBlend() const
+{
+	if (UseBlendMovement())
+	{
+		return true;
+	}
+
+	const CHUDState::EHudStates state = static_cast<CHUDState::EHudStates>(GetState());
+
+	return state != CHUDState::EHudStates::eIdle && state != CHUDState::EHudStates::eSprintStart && state != CHUDState::EHudStates::eSprintEnd;
+}
+
+THudLightTorch* CHudItem::GetHudLight()
+{
+	return m_object->GetComponent<THudLightTorch>();
+}
+
+script_layer* CHudItem::PlayBlendAnm(const shared_str& name, float speed, float power, Fvector2 blend_factors, bool looped, bool mix, bool restart, u8 part, u8 item, u8 state)
+{
+	return g_player_hud->PlayBlendAnm(name, speed, power, blend_factors, looped, mix, restart, part, item, state);
+}
+
+void CHudItem::StopBlendAnm(const shared_str& name, bool Force) { g_player_hud->StopBlendAnm(name, Force); }
+
+void CHudItem::StopAllBlendAnms(bool Force, u8 part) { g_player_hud->StopAllBlendAnms(Force); }
+
+bool CHudItem::IsBlendAnmActive(const shared_str& name) { return g_player_hud->IsBlendAnmActive(name); }
+
+bool CHudItem::render_item_3d_ui_query()
+{
+	return HudItemData() && GetHUDmode() && ScriptWindow;
+}
+
+void CHudItem::render_item_3d_ui()
+{
+	if (render_item_3d_ui_query() && ScriptWindow)
+	{
+		Fmatrix LM = Fidentity;
+
+		attachable_hud_item* hid = HudItemData();
+		IKinematics* kin = hid->m_model;
+
+		u16 BoneID = kin->LL_BoneID(ScriptUIBone);
+
+		R_ASSERT2(BoneID != BI_NONE, "Invalid Script UI Bone");
+
+		LM.mul(hid->m_item_transform, kin->LL_GetTransform(BoneID)).mulB_43(ScriptUIMatrix);
+
+		IUIRender::ePointType bk = UI().m_currentPointType;
+
+		UI().m_currentPointType = IUIRender::pttLIT;
+
+		UIRender->CacheSetXformWorld(LM);
+		UIRender->CacheSetCullMode(ERHI_CULLMODE::NONE);
+
+		ScriptWindow->Draw();
+
+		UI().m_currentPointType = bk;
+	}
+
+	UIRender->CacheSetCullMode(ERHI_CULLMODE::BACK);
+}

@@ -1,0 +1,37 @@
+#pragma once
+#include "game_cl_base.h"
+#include "../xrScripts/script_export_space.h"
+
+class game_cl_Single final : public game_cl_GameState
+{
+	using inherited = game_cl_GameState;
+public :
+										game_cl_Single			();
+	virtual		CUIGameCustom*			createGameUI			();
+	virtual		char*					getTeamSection			(int Team);
+	virtual		bool					IsServerControlHits		()	{return true;};
+
+	virtual		void					SetGameTimeFactor		(const float fTimeFactor);
+
+	virtual		void				SetEnvironmentGameTimeFactor(const float fTimeFactor);
+
+	virtual game_cl_Single* cast_game_cl_single() override { return this; }
+
+	void		OnDifficultyChanged		();
+};
+
+
+// game difficulty
+enum ESingleGameDifficulty{
+	egdNovice			= 0,
+	egdStalker			= 1,
+	egdVeteran			= 2,
+	egdMaster			= 3,
+	egdCount,
+	egd_force_u32		= u32(-1)
+};
+
+extern ESingleGameDifficulty g_SingleGameDifficulty;
+extern xr_token difficulty_type_token[];
+
+typedef enum_exporter<ESingleGameDifficulty> CScriptGameDifficulty;

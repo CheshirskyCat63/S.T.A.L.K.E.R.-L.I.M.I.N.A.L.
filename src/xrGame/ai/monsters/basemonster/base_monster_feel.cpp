@@ -1,0 +1,719 @@
+////////////////////////////////////////////////////////////////////////////
+//	Module 		: base_monster_feel.cpp
+//	Created 	: 26.05.2003
+//  Modified 	: 26.05.2003
+//	Author		: Serge Zhem
+//	Description : Visibility and look for all the biting monsters
+////////////////////////////////////////////////////////////////////////////
+
+#include "StdAfx.h"
+#include "../../../../xrEngine/MonsterLogicTelemetry.h"
+#include "pch_script.h"
+#include "base_monster.h"
+#include "../../../../xrEngine/GameMtlLib.h"
+#include "../../../../xrCore/Kernel/EngineExternal.h"
+#include "../controlled_entity.h"
+#include "../../../Actor.h"
+#include "../../../ActorEffector.h"
+#include "../ai_monster_effector.h"
+#include "../MonsterBehaviorPolicy.h"
+#include "../../../../Include/xrRender/KinematicsAnimated.h"
+#include "../../../sound_player.h"
+#include "../../../Level.h"
+#include "../../../script_game_object.h"
+#include "../../../game_object_space.h"
+#include "../../../ai_monster_space.h"
+#include "../control_animation_base.h"
+#include "ui/UIGameCustom.h"
+#include "../../../../xrUI/Widgets/UIStatic.h"
+#include "../../../ai_object_location.h"
+#include "../../../ai_space.h"
+#include "../../../level_graph.h"
+#include "../../../../xrEngine/CameraBase.h"
+#include "../../../../xrScripts/script_callback_ex.h"
+#include "../../../ActorCondition.h"
+#include "../../../Inventory.h"
+#include "../snork/snork.h"
+#include "../pseudogigant/pseudo_gigant.h"
+#include "../../../MonsterEnemySharingDebug.h"
+
+float CBaseMonster::GetHearingRangeFactor() const
+{
+	return EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation] ? HearingFactor : 1.f;
+}
+
+float CBaseMonster::GetDistanceSoundRange(int Type) const
+{
+	if (!EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation]) return -1.f;
+	if (Type == int(0xffffffff) || MonsterPeaceful || !g_Alive()) return 0.f;
+	const bool Explosion = (Type & SOUND_TYPE_OBJECT_EXPLODING) != 0;
+	const bool Shot = (Type & SOUND_TYPE_SHOOTING) != 0;
+	const auto& Reaction = Explosion ? ExplosionReaction : ShotReaction;
+	float Radius = Explosion || Shot ? Reaction.Radius : Behavior.SoundReactionRadius;
+	float Ratio = 1.f;
+	if (Explosion)
+	{
+		Ratio = Behavior.ExplosionHearingRatio;
+	}
+	else if (Shot)
+	{
+		Ratio = Behavior.ShotHearingRatio;
+	}
+	else if (Type & SOUND_TYPE_STEP)
+	{
+		Ratio = Behavior.StepHearingRatio;
+	}
+	else if (Type & SOUND_TYPE_BULLET_HIT)
+	{
+		Ratio = Behavior.BulletHitHearingRatio;
+	}
+	else if (Type & SOUND_TYPE_ATTACKING)
+	{
+		Ratio = Behavior.CombatHearingRatio;
+	}
+	else if (Type & SOUND_TYPE_INJURING)
+	{
+		Ratio = Behavior.InjuryHearingRatio;
+	}
+	else if (Type & SOUND_TYPE_DYING)
+	{
+		Ratio = Behavior.DeathHearingRatio;
+	}
+	else if (Type & SOUND_TYPE_OBJECT_BREAKING)
+	{
+		Ratio = Behavior.BreakingHearingRatio;
+	}
+	else if (Type & SOUND_TYPE_OBJECT_COLLIDING)
+	{
+		Ratio = Behavior.CollisionHearingRatio;
+	}
+	Radius *= Ratio;
+	if (Type & SOUND_TYPE_SUPPRESSED)
+	{
+		Radius *= Behavior.SuppressedHearingRatio;
+	}
+	if (Type & SOUND_TYPE_MELEE)
+	{
+		Radius *= Behavior.MeleeHearingRatio;
+	}
+	return Radius;
+}
+
+bool CBaseMonster::HasPriorityNoise() const
+{
+	if (!EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation]) return false;
+	if (NoiseInvestigationUntil || HasDamagePanic() ||
+		(Behavior.ActionUntil && s32(Behavior.ActionUntil - Device.dwTimeGlobal) > 0 && xr_strcmp(Behavior.ActionMode, "NOISE SEARCH") == 0)) return true;
+	if (Behavior.NoiseLookUntil && s32(Behavior.NoiseLookUntil - Device.dwTimeGlobal) > 0) return true;
+	for (const auto& Noise : Behavior.NoiseAttention)
+	{
+		if (Noise.Until && s32(Noise.Until - Device.dwTimeGlobal) > 0 && Noise.LastCheckedEvent != Noise.LastInterest) return true;
+	}
+	return false;
+}
+
+bool CBaseMonster::IsFriendlyNoiseSource(CObject* Source) const
+{
+	for (u32 Depth = 0; Source && Source->H_Parent() && Depth < 4; ++Depth)
+	{
+		Source = Source->H_Parent();
+	}
+	CBaseMonster* Other = Source ? Source->cast_base_monster() : nullptr;
+	if (!Other)
+	{
+		return false;
+	}
+	if (Other == this)
+	{
+		return true;
+	}
+	if (is_relation_enemy(Other) || Other->is_relation_enemy(this))
+	{
+		return false;
+	}
+	const bool SamePack = g_Team() == Other->g_Team() && g_Squad() == Other->g_Squad() && g_Group() == Other->g_Group();
+	const bool MutualFriends = tfGetRelationType(Other) == ALife::eRelationTypeFriend &&
+		Other->tfGetRelationType(this) == ALife::eRelationTypeFriend;
+	return SamePack || MutualFriends;
+}
+
+bool CBaseMonster::ReactToLoudNoise(CObject* Source, int SoundType, const Fvector& SoundPosition, float Power)
+{
+	if (!EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation])
+	{
+		return false;
+	}
+	const bool Explosion = (SoundType & SOUND_TYPE_OBJECT_EXPLODING) != 0;
+	const bool Shot = (SoundType & SOUND_TYPE_SHOOTING) != 0;
+	const bool General = !Explosion && !Shot && (SoundType & (SOUND_TYPE_STEP | SOUND_TYPE_ATTACKING | SOUND_TYPE_INJURING |
+		SOUND_TYPE_DYING | SOUND_TYPE_OBJECT_BREAKING | SOUND_TYPE_OBJECT_COLLIDING | SOUND_TYPE_BULLET_HIT | SOUND_TYPE_MELEE)) != 0;
+	if (!Explosion && !Shot && !General)
+	{
+		return false;
+	}
+
+	CMonsterLogicTimerScope TotalTimer(EMonsterLogicTimer::NewLogicTotal);
+	SNoiseReaction& Reaction = Explosion || (General && !ShotReaction.Attract) ? ExplosionReaction : ShotReaction;
+	const float Radius = GetDistanceSoundRange(SoundType) * GetHearingRangeFactor();
+	if (!Reaction.Enabled || (General ? !Reaction.Attract : (!Reaction.Attract && !Reaction.FearEnabled)) || Radius <= 0.f || MonsterPeaceful || !g_Alive() ||
+		GetScriptControl() || EnemyMan.get_script_enemy() || control().is_captured_pure() || (m_controlled && m_controlled->is_under_control()) ||
+		Position().distance_to_sqr(SoundPosition) > Radius * Radius ||
+		GetHearingRangeFactor() <= 0.f)
+	{
+		return true;
+	}
+
+	if (HasDamagePanic()) return true;
+	CObject* Emitter = Source;
+	for (u32 Depth = 0; Emitter && Emitter->H_Parent() && Depth < 4; ++Depth) Emitter = Emitter->H_Parent();
+	// Friendly pack activity is not an acoustic investigation target; death alerts use their own handler.
+	if (IsFriendlyNoiseSource(Emitter))
+	{
+		return true;
+	}
+	const u32 Accumulated = Behavior.HearNoise(*this, Emitter, SoundPosition, 1.f, Explosion, General, u32(SoundType));
+	const bool Interested = (Accumulated & 1u) != 0;
+	const bool Cooling = Reaction.NextReactionTime && s32(Reaction.NextReactionTime - Device.dwTimeGlobal) > 0;
+	const auto Outcome = CMonsterBehaviorPolicy::AccumulatedNoiseOutcome(Interested, (Accumulated & 2u) != 0, Cooling);
+	g_MonsterLogicTelemetry.Count(Explosion ? EMonsterLogicCounter::ExplosionNoise : EMonsterLogicCounter::ShotNoise);
+	if (Outcome == CMonsterBehaviorPolicy::Panic)
+	{
+		Reaction.NextReactionTime = Device.dwTimeGlobal + NoiseReactionCooldown;
+		if (MonsterEnemySharingDebug().IsEnabled()) MonsterEnemySharingDebug().RecordNoiseReaction(*this, SoundPosition, Power, true, Explosion, false, General, u32(SoundType), Emitter && Emitter->cast_actor(), Behavior.LastNoiseInterest);
+		DamagePanicThreat = SoundPosition;
+		const u32 Until = Device.dwTimeGlobal + NoisePanicDuration;
+		if (!HasDamagePanic() || s32(Until - DamagePanicUntil) > 0)
+		{
+			DamagePanicUntil = Until;
+		}
+		NoiseInvestigationUntil = 0;
+		Behavior.AttentionUntil = 0;
+		Behavior.NoiseLookUntil = 0;
+		if (xr_strcmp(Behavior.ActionMode, "NOISE SEARCH") == 0) Behavior.ActionUntil = 0;
+		for (auto& Noise : Behavior.NoiseAttention) Noise = {};
+		SetAttentionVisionObject(nullptr, 0);
+		g_MonsterLogicTelemetry.Count(EMonsterLogicCounter::NoisePanic);
+		return true;
+	}
+	if (Outcome != CMonsterBehaviorPolicy::Investigate || !Interested || HasDamagePanic())
+	{
+		return true;
+	}
+
+	const u32 EmitterID = Emitter ? u32(Emitter->ID()) : u32(-1);
+	if (NoiseInvestigationUntil && (EmitterID != NoiseInvestigationSource ||
+		(EmitterID == u32(-1) && NoiseInvestigationPosition.distance_to_xz(SoundPosition) > 2.f)))
+	{
+		// A new unrelated noise cannot silently replace an unvisited committed acoustic point.
+		return true;
+	}
+	const CEntityAlive* Current = EnemyMan.get_enemy();
+	if (Current && u32(Current->ID()) == EmitterID && EnemyMan.see_enemy_now(Current)) return true;
+
+	// Attraction uses the delivered position; native shooting panic must not override this policy.
+
+	if (!NoiseInvestigationUntil || NoiseInvestigationPosition.distance_to_xz(SoundPosition) > 2.f)
+	{
+		NoiseProgressTime = Device.dwTimeGlobal ? Device.dwTimeGlobal : 1;
+		NoiseProgressDistance = NoiseProgressDirectDistance = -1.f; NoiseProgressSampleTime = 0;
+		NoiseProgressPosition = Position();
+		NoiseInvestigationLookUntil = Device.dwTimeGlobal + 1000;
+	}
+	NoiseInvestigationSource = Emitter ? u32(Emitter->ID()) : u32(-1);
+	NoiseInvestigationPosition = SoundPosition;
+	NoiseInvestigationVertex = u32(-1);
+	if (ai().level_graph().valid_vertex_position(SoundPosition))
+	{
+		const u32 Candidate = ai().level_graph().vertex_id(SoundPosition);
+		if (ai().level_graph().valid_vertex_id(Candidate))
+		{
+			NoiseInvestigationVertex = Candidate;
+		}
+	}
+	if (!ai().level_graph().valid_vertex_id(NoiseInvestigationVertex) || !control().path_builder().accessible(NoiseInvestigationVertex))
+	{
+		NoiseInvestigationVertex = CControlPathBuilder::find_nearest_vertex(ai_location().level_vertex_id(), SoundPosition, 10.f);
+	}
+	if (ai().level_graph().valid_vertex_id(NoiseInvestigationVertex))
+	{
+		// Sound height can be off the navigation mesh (a shot from a roof or below ground).
+		NoiseInvestigationPosition = ai().level_graph().vertex_position(NoiseInvestigationVertex);
+	}
+	NoiseInvestigationUntil = ai().level_graph().valid_vertex_id(NoiseInvestigationVertex) ? Device.dwTimeGlobal + Behavior.NoiseSearchTime : 0;
+	if (MonsterEnemySharingDebug().IsEnabled()) MonsterEnemySharingDebug().RecordNoiseReaction(*this, SoundPosition, Power, false, Explosion, NoiseInvestigationUntil != 0, General, u32(SoundType), Emitter && Emitter->cast_actor(), Behavior.LastNoiseInterest);
+
+	if (NoiseInvestigationUntil)
+	{
+		g_MonsterLogicTelemetry.Count(EMonsterLogicCounter::NoiseAttract);
+	}
+	return true;
+}
+
+void CBaseMonster::feel_sound_new(CObject* who, int eType, CSound_UserDataPtr user_data, const Fvector &Position, float power)
+{
+	if (!g_Alive() || GetHearingRangeFactor() <= 0.f) return;
+
+	// ignore my sounds
+	if (this == who)	return;
+
+	PROF_EVENT("CBaseMonster::feel_sound_new");
+
+
+	if (user_data)
+		user_data->accept	(sound_user_data_visitor());
+
+	if ((eType & SOUND_TYPE_DYING) != 0 && eType != int(0xffffffff) && EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation])
+	{
+		Behavior.HearDeath(*this, who ? who->cast_base_monster() : nullptr, Position, power);
+	}
+
+	// ignore unknown sounds
+	if (eType == 0xffffffff) return;
+	if (ReactToLoudNoise(who, eType, Position, power))
+	{
+		sound_callback(who, eType, Position, power);
+		return;
+	}
+
+	// ignore distant sounds
+	Fvector center;
+	Center	(center);
+	float dist	= center.distance_to(Position);
+	if (dist > db().m_max_hear_dist)	return;
+
+	// ignore sounds if not from enemies and not help sounds
+	CEntityAlive* entity = who ? who->cast_entity_alive() : NULL;
+
+	// ignore sound if enemy drop a weapon on death
+	if (!entity && ((eType & SOUND_TYPE_ITEM_HIDING) == SOUND_TYPE_ITEM_HIDING)) return;
+
+	if (entity && (!EnemyMan.is_enemy(entity))) {
+		SoundMemory.check_help_sound(eType, entity->ai_location().level_vertex_id());
+		return;
+	}
+
+	if ((eType & SOUND_TYPE_WEAPON_SHOOTING) == SOUND_TYPE_WEAPON_SHOOTING) power = 1.f;
+
+	if (((eType & SOUND_TYPE_WEAPON_BULLET_HIT) == SOUND_TYPE_WEAPON_BULLET_HIT) && (dist < 2.f))
+		HitMemory.add_hit(who,eSideFront);
+
+	// execute callback
+	sound_callback	(who,eType,Position,power);
+
+	// register in sound memory
+	if (power >= db().m_fSoundThreshold) {
+		SoundMemory.HearSound(who,eType,Position,power,Device.dwTimeGlobal);
+ 	}
+}
+#define MAX_LOCK_TIME 2.f
+
+void CBaseMonster::HitEntity(const CEntity *pEntity, float fDamage, float impulse, Fvector &dir, ALife::EHitType hit_type, bool draw_hit_marks)
+{
+	if (!g_Alive()) return;
+	if (!pEntity || pEntity->getDestroy()) return;
+
+	if (!EnemyMan.get_enemy()) return;
+
+	if (EnemyMan.get_enemy() == pEntity) {
+		Fvector position_in_bone_space;
+		position_in_bone_space.set(0.f,0.f,0.f);
+
+		// перевод из локальных координат в мировые вектора направления импульса
+		Fvector hit_dir;
+		XFORM().transform_dir	(hit_dir,dir);
+		hit_dir.normalize		();
+
+		CEntity		*pEntityNC	= const_cast<CEntity*>(pEntity);
+		VERIFY		(pEntityNC);
+
+		NET_Packet	l_P;
+		SHit		HS;
+		HS.GenHeader(GE_HIT, pEntityNC->ID());													//		u_EventGen	(l_P,GE_HIT, pEntityNC->ID());
+		HS.whoID			= (ID());															//		l_P.w_u16	(ID());
+		HS.weaponID			= (ID());															//		l_P.w_u16	(ID());
+		HS.dir				= (hit_dir);														//		l_P.w_dir	(hit_dir);
+		HS.power			= (fDamage);														//		l_P.w_float	(fDamage);
+		HS.boneID			= (PKinematics(pEntityNC->Visual())->LL_GetBoneRoot());				//		l_P.w_s16	(smart_cast<IKinematics*>(pEntityNC->Visual())->LL_GetBoneRoot());
+		HS.p_in_bone_space	= (position_in_bone_space);											//		l_P.w_vec3	(position_in_bone_space);
+		HS.impulse			= (impulse);														//		l_P.w_float	(impulse);
+		HS.hit_type			= hit_type;															//		l_P.w_u16	( u16(ALife::eHitTypeWound) );
+		HS.Write_Packet(l_P);
+		u_EventSend	(l_P);
+
+		if (pEntityNC == Actor() && !GodMode() && m_bCanDropActorWeapon && smart_cast<CSnork*>(this) == nullptr && smart_cast<CPseudoGigant*>(this) == nullptr)
+		{
+			const float stamina = Actor()->conditions().GetPower();
+
+			bool need_kick_animator = false;
+
+			PIItem active_item = Actor()->inventory().ActiveItem();
+			CCustomDevice* device = Actor()->GetDevice();
+
+			if (stamina > HS.power)
+			{
+				Actor()->conditions().SetPower(stamina - HS.power);
+			}
+			else if (active_item != nullptr || device != nullptr)
+			{
+				if (::Random.randF(0.0f, 1.0f) < HS.power - stamina)
+				{
+					if (active_item != nullptr)
+					{
+						u16 slot = active_item->BaseSlot();
+						if (!Actor()->inventory().SlotIsPersistent(slot) && !Actor()->inventory().Action(kDROP, CMD_STOP))
+						{
+							Actor()->g_PerformDrop();
+							need_kick_animator = true;
+						}
+					}
+
+					if (device != nullptr)
+					{
+						device->SetDropManual(true);
+						need_kick_animator = true;
+					}
+				}
+			}
+			else
+			{
+				need_kick_animator = true;
+			}
+
+			if (need_kick_animator && !Actor()->HudAnimator()->IsAnyAnimatorActive())
+			{
+				auto GetAngleCos = [&](const Fvector& v1, const Fvector& v2)
+				{
+					return v1.dotproduct(v2) / (v1.magnitude() * v2.magnitude());
+				};
+
+				bool is_actor_see_monster = GetAngleCos(HS.dir, Device.vCameraDirection) < 0.0f;
+
+				Actor()->inventory().SetActiveSlot(NO_ACTIVE_SLOT);
+
+				const shared_str& front_kick_animator = Actor()->m_sFrontKickAnimator;
+				const shared_str& back_kick_animator = Actor()->m_sBackKickAnimator;
+
+				if (is_actor_see_monster)
+				{
+					if (front_kick_animator.size() > 0)
+					{
+						Actor()->HudAnimator()->ItemAnimator()->StartAnimator(front_kick_animator);
+					}
+				}
+				else
+				{
+					if (back_kick_animator.size() > 0)
+					{
+						Actor()->HudAnimator()->ItemAnimator()->StartAnimator(back_kick_animator);
+					}
+				}
+			}
+		}
+
+		if ((OnClient() || IsGameTypeSingle()) && pEntityNC == Actor() && draw_hit_marks)
+		{
+			PROF_EVENT("BaseMonster/Animation/HitEntity");
+
+			SDrawStaticStruct* s = CurrentGameUI()->AddCustomStatic("monster_claws", false, 3.0f);
+
+			float h1,p1;
+			Device.vCameraDirection.getHP	(h1,p1);
+			Fvector hd				= hit_dir;
+			hd.mul					(-1);
+			float d = -h1 + hd.getH	();
+			s->wnd()->SetHeading	(d);
+			Fvector2 wnd_pos = s->wnd()->GetWndPos();
+			wnd_pos.y	+= 400.0f*std::cos(d);
+			wnd_pos.x	+= 500.0f*std::sin(d);
+			s->wnd()->SetWndPos(wnd_pos);
+
+			float time_to_lock		= fDamage * MAX_LOCK_TIME;
+			clamp					(time_to_lock, 0.f, MAX_LOCK_TIME);
+			Actor()->lock_accel_for	(int(time_to_lock * 1000));
+
+			//////////////////////////////////////////////////////////////////////////
+			//
+			//////////////////////////////////////////////////////////////////////////
+
+			CEffectorCam* ce = Actor()->Cameras().GetCamEffector((ECamEffectorType)effBigMonsterHit);
+			if(!ce)
+			{
+				const shared_str&	eff_sect = pSettings->r_string(cNameSect(), "actor_hit_effect");
+				if(eff_sect.c_str())
+				{
+					int id						= -1;
+					Fvector						cam_pos,cam_dir,cam_norm;
+					Actor()->cam_Active()->Get	(cam_pos,cam_dir,cam_norm);
+					cam_dir.normalize_safe		();
+					dir.normalize_safe			();
+
+					float ang_diff				= angle_difference	(cam_dir.getH(), dir.getH());
+					Fvector						cp;
+					cp.crossproduct				(cam_dir,dir);
+					bool bUp					=(cp.y>0.0f);
+
+					Fvector cross;
+					cross.crossproduct			(cam_dir, dir);
+					VERIFY						(ang_diff>=0.0f && ang_diff<=PI);
+
+					float _s1 = PI_DIV_8;
+					float _s2 = _s1+PI_DIV_4;
+					float _s3 = _s2+PI_DIV_4;
+					float _s4 = _s3+PI_DIV_4;
+
+					if(ang_diff<=_s1){
+						id = 2;
+					}else {
+						if(ang_diff>_s1 && ang_diff<=_s2){
+							id = (bUp)?5:7;
+						}else
+							if(ang_diff>_s2 && ang_diff<=_s3){
+								id = (bUp)?3:1;
+							}else
+								if(ang_diff>_s3 && ang_diff<=_s4){
+									id = (bUp)?4:6;
+								}else
+									if(ang_diff>_s4){
+										id = 0;
+									}else{
+										VERIFY(0);
+									}
+					}
+
+					string64				sect_name;
+
+					xr_sprintf					(sect_name,"%s_%d",eff_sect.c_str(), id);
+					AddEffector				(Actor(), effBigMonsterHit, sect_name, fDamage);
+				}
+			}
+			//////////////////////////////////////////////////////////////////////////
+
+
+		}
+
+		Morale.on_attack_success();
+
+		m_time_last_attack_success	= Device.dwTimeGlobal;
+	}
+}
+
+
+float CBaseMonster::feel_vision_mtl_transp(CObject* Object, u32 Element)
+{
+	if (!Object && VisionIgnoreFoliage && EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterVisionIgnoreFoliage])
+	{
+		const CDB::TRI& Triangle = Level().ObjectSpace.GetStaticTris()[Element];
+		const SGameMtl* Material = GMLib.GetMaterialByIdx(Triangle.material);
+		if (Material && (Material->Flags.is(SGameMtl::flPassable) || Material->Flags.is(SGameMtl::flActorObstacle)))
+		{
+			// Filter foliage explicitly: unrelated passable geometry and trunks still occlude vision.
+			const char* Name = Material->m_Name.c_str();
+			if (Name && (!xr_strcmp(Name, "materials\\bush") || !xr_strcmp(Name, "materials\\bush_sux") ||
+				!xr_strcmp(Name, "materials\\leaves") || !xr_strcmp(Name, "materials\\foliage")))
+			{
+				return 1.f;
+			}
+		}
+	}
+	return inherited::feel_vision_mtl_transp(Object, Element);
+}
+
+bool  CBaseMonster::feel_vision_isRelevant(CObject* O)
+{
+	if(!O || O->getDestroy())		return false;
+	if (!g_Alive())					return false;
+	if (!O->cast_entity())			return false;
+
+	if ((O->SpatialComponent->type & ESPATIAL_TYPE::VISIBLEFORAI) == ESPATIAL_TYPE::NONE)
+		return false;
+
+	// если спит, то ничего не видит
+	if (m_bSleep) return false;
+
+	// если не враг - не видит
+	CEntityAlive* entity = O->cast_entity_alive();
+	if (entity && entity->g_Alive())
+	{
+		if (!EnemyMan.is_enemy(entity))
+		{
+			// если видит друга - проверить наличие у него врагов
+			CBaseMonster *monster = entity->cast_base_monster();
+			if (EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation])
+			{
+				return !MonsterPeaceful && monster && !monster->MonsterPeaceful && !m_skip_transfer_enemy && EnemyMan.CanReceiveFrom(monster);
+			}
+			if (monster && !m_skip_transfer_enemy) EnemyMan.transfer_enemy(monster);
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool CBaseMonster::HasDamagePanic() const
+{
+	return DamagePanicUntil != 0 && s32(DamagePanicUntil - Device.dwTimeGlobal) > 0;
+}
+
+bool CBaseMonster::is_relation_enemy(const CEntityAlive* Other) const
+{
+	if (MonsterPeaceful)
+	{
+		return false;
+	}
+	return EnemyMan.HasDamageFocus(Other) || inherited::is_relation_enemy(Other);
+}
+
+void CBaseMonster::ReactToActorDamage(float Amount, CObject* Attacker)
+{
+	CMonsterLogicTimerScope TotalTimer(EMonsterLogicTimer::NewLogicTotal,
+		EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation]);
+	if (!EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation] ||
+		MonsterPeaceful || Amount <= 0.f || !Attacker || !g_Alive() || GetScriptControl() ||
+		(m_controlled && m_controlled->is_under_control()))
+	{
+		return;
+	}
+	CActor* Player = smart_cast<CActor*>(Attacker);
+	if (!Player || Player->getDestroy() || !Player->g_Alive())
+	{
+		return;
+	}
+	CMonsterLogicTimerScope HitTimer(EMonsterLogicTimer::ActorHit);
+	g_MonsterLogicTelemetry.Count(EMonsterLogicCounter::Hits);
+	const bool TooFar = Position().distance_to_sqr(Player->Position()) > AutoFocusMaxDist * AutoFocusMaxDist;
+	if (TooFar && AutoPanicOnInvisibleDamage)
+	{
+		g_MonsterLogicTelemetry.Count(EMonsterLogicCounter::Panic);
+		DamagePanicThreat = Player->Position();
+		DamagePanicUntil = Device.dwTimeGlobal + u32(Random.randI(6000, 10001));
+	}
+	if (!TooFar && AutoFocusAttacker)
+	{
+		g_MonsterLogicTelemetry.Count(EMonsterLogicCounter::Focus);
+		DamagePanicUntil = 0;
+		NoiseInvestigationUntil = 0;
+		NoiseInvestigationLookUntil = 0;
+		Behavior.NextUpdate = 0;
+		EnemyMan.FocusDamageAttacker(Player);
+	}
+}
+
+void CBaseMonster::HitSignal(float amount, Fvector& vLocalDir, CObject* who, s16 element)
+{
+	if (!g_Alive()) return;
+
+	if (who && !EngineExternal()[EEngineExternalMonstersLogic::EnableMonsterFactionEnemySharingIsolation])
+	{
+		feel_sound_new(who, SOUND_TYPE_WEAPON_SHOOTING, 0, who->Position(), 1.f);
+	}
+	if (g_Alive()) sound().play(MonsterSound::eMonsterSoundTakeDamage);
+
+	if (element < 0) return;
+
+	// Определить направление хита (перед || зад || лево || право)
+	float yaw,pitch;
+	vLocalDir.getHP(yaw,pitch);
+
+	yaw = angle_normalize(yaw);
+
+	EHitSide hit_side = eSideFront;
+	if ((yaw >= PI_DIV_4) && (yaw <= 3*PI_DIV_4)) hit_side = eSideLeft;
+	else if ((yaw >= 3 * PI_DIV_4) && (yaw <= 5*PI_DIV_4)) hit_side = eSideBack;
+	else if ((yaw >= 5 * PI_DIV_4) && (yaw <= 7*PI_DIV_4)) hit_side = eSideRight;
+
+	anim().FX_Play	(hit_side, 1.0f);
+
+	HitMemory.add_hit	(who,hit_side);
+
+	Morale.on_hit		();
+
+	if (ScriptCallbacksEnabled())
+	{
+		callback(GameObject::eHit)(
+			lua_game_object(),
+			amount,
+			vLocalDir,
+			who->cast_game_object()->lua_game_object(),
+			element
+		);
+	}
+
+	// если нейтрал - добавить как врага
+	CEntityAlive	*obj = who->cast_entity_alive();
+	if (obj && (tfGetRelationType(obj) == ALife::eRelationTypeNeutral)) EnemyMan.add_enemy(obj);
+}
+
+void CBaseMonster::SetAttackEffector()
+{
+	CActor *pA = Level().CurrentEntity() != nullptr ? Level().CurrentEntity()->cast_actor() : nullptr;
+	if (pA) {
+		Actor()->Cameras().AddCamEffector(new CMonsterEffectorHit(db().m_attack_effector.ce_time,db().m_attack_effector.ce_amplitude,db().m_attack_effector.ce_period_number,db().m_attack_effector.ce_power));
+		Actor()->Cameras().AddPPEffector(new CMonsterEffector(db().m_attack_effector.ppi, db().m_attack_effector.time, db().m_attack_effector.time_attack, db().m_attack_effector.time_release));
+	}
+}
+
+void CBaseMonster::Hit_Psy(CObject *object, float value)
+{
+	NET_Packet		P;
+	SHit			HS;
+	HS.GenHeader		(GE_HIT, object->ID());				//					//	u_EventGen		(P,GE_HIT, object->ID());				//
+	HS.whoID			= (ID());									// own		//	P.w_u16			(ID());									// own
+	HS.weaponID			= (ID());									// own		//	P.w_u16			(ID());									// own
+	HS.dir				= (Fvector().set(0.f,1.f,0.f));			// direction	//	P.w_dir			(Fvector().set(0.f,1.f,0.f));			// direction
+	HS.power			= (value);								// hit value	//	P.w_float		(value);								// hit value
+	HS.boneID			= (BI_NONE);								// bone		//	P.w_s16			(BI_NONE);								// bone
+	HS.p_in_bone_space	= (Fvector().set(0.f,0.f,0.f));							//	P.w_vec3		(Fvector().set(0.f,0.f,0.f));
+	HS.impulse			= (0.f);												//	P.w_float		(0.f);
+	HS.hit_type			= (ALife::eHitTypeTelepatic);							//	P.w_u16			(u16(ALife::eHitTypeTelepatic));
+	HS.Write_Packet	(P);
+	u_EventSend		(P);
+}
+
+void CBaseMonster::Hit_Wound(CObject *object, float value, const Fvector &dir, float impulse)
+{
+	NET_Packet	P;
+	SHit		HS;
+	HS.GenHeader(GE_HIT, object->ID());														//	u_EventGen	(P,GE_HIT, object->ID());
+	HS.whoID			= (ID());															//	P.w_u16		(ID());
+	HS.weaponID			= (ID());															//	P.w_u16		(ID());
+	HS.dir				= (dir);															//	P.w_dir		(dir);
+	HS.power			= (value);															//	P.w_float	(value);
+	HS.boneID			= (PKinematics(object->Visual())->LL_GetBoneRoot());	//	P.w_s16		(smart_cast<IKinematics*>(object->Visual())->LL_GetBoneRoot());
+	HS.p_in_bone_space	= (Fvector().set(0.f,0.f,0.f));										//	P.w_vec3	(Fvector().set(0.f,0.f,0.f));
+	HS.impulse			= (impulse);														//	P.w_float	(impulse);
+	HS.hit_type			= (ALife::eHitTypeWound);											//	P.w_u16		(u16(ALife::eHitTypeWound));
+	HS.Write_Packet(P);
+	u_EventSend	(P);
+}
+
+bool CBaseMonster::critical_wound_external_conditions_suitable	()
+{
+	if (!control().check_start_conditions(ControlCom::eControlSequencer))
+		return false;
+
+	if (!anim().IsStandCurAnim()) return false;
+
+	return true;
+}
+
+void CBaseMonster::critical_wounded_state_start()
+{
+	VERIFY	(m_critical_wound_type != u32(-1));
+
+	const char* anim = 0;
+	switch (m_critical_wound_type)	{
+	case critical_wound_type_head:
+		anim = m_critical_wound_anim_head;
+		break;
+	case critical_wound_type_torso:
+		anim = m_critical_wound_anim_torso;
+		break;
+	case critical_wound_type_legs:
+		anim = m_critical_wound_anim_legs;
+		break;
+	}
+
+	VERIFY	(anim);
+	com_man().critical_wound(anim);
+}

@@ -1,0 +1,630 @@
+#include "StdAfx.h"
+#include "WatchUI.h"
+#include "WatchInternal.h"
+#include "../../xrEngine/FontManager.h"
+#include "../../xrEngine/string_table.h"
+#include "../../xrUI/ui_base.h"
+#include "../../xrUI/UIXmlInit.h"
+#include "../../xrUI/xrUIXmlParser.h"
+
+namespace
+{
+constexpr const char* WatchXml = "watch_hud.xml";
+constexpr const char* WatchTextShader = "hud\\watch_text";
+constexpr const char* WatchGlowShader = "hud\\watch_glow";
+constexpr const char* WatchGlowTexShader = "hud\\watch_glow_tex";
+constexpr const char* WatchGlassShader = "hud\\watch_glass";
+constexpr const char* WatchLedShader = "hud\\watch_led";
+constexpr u32 WatchLedSegments = 16;
+constexpr u32 WatchLedMaxVerts = WatchLedSegments * 12;
+constexpr u32 WatchGlassDefaultLitAlpha = 90;
+
+constexpr float WatchGlassCapNormal = 2.0f;
+
+struct SLedVertex
+{
+	Fvector P;
+	Fvector2 N;
+};
+
+struct SLedCircle
+{
+	Fvector2 Points[WatchLedSegments + 1];
+
+	SLedCircle()
+	{
+		for (u32 Index = 0; Index <= WatchLedSegments; ++Index)
+		{
+			const float Angle = PI_MUL_2 * float(Index) / float(WatchLedSegments);
+			Points[Index].set(std::cos(Angle), std::sin(Angle));
+		}
+	}
+};
+
+const SLedCircle& LedCircle()
+{
+	static const SLedCircle Circle;
+	return Circle;
+}
+}
+
+bool CUIWatchText::Init(CUIXml& Xml, const char* Path, const shared_str& FontName)
+{
+	Color = CUIXmlInit::GetColor(Xml, Path, 0, Color);
+	DrawColor = Color;
+
+	const char* AlignText = Xml.ReadAttrib(Path, 0, "align", "l");
+	if (AlignText[0] == 'c')
+	{
+		Align = EAlign::Center;
+	}
+	else if (AlignText[0] == 'r')
+	{
+		Align = EAlign::Right;
+	}
+
+	if (!FontName.size() || !pSettings->section_exist(FontName.c_str()) || !pSettings->line_exist(FontName.c_str(), "shader"))
+	{
+		Msg("! [watch] %s: font section [%s] not found or has no shader", Path, FontName.size() ? FontName.c_str() : "");
+		return false;
+	}
+
+	Font = UI().Font().GetFont(FontName);
+
+	string128 Texture = {};
+	xr_sprintf(Texture, "$user$%s", FontName.c_str());
+	Shader->create(Xml.ReadAttrib(Path, 0, "shader", WatchTextShader), Texture);
+	return true;
+}
+
+void CUIWatchText::SetText(const char* Text)
+{
+	Quads.clear();
+	TextWidth = 0.0f;
+
+	u32 AtlasWidth = 0;
+	u32 AtlasHeight = 0;
+	if (!Font || !Text || !Font->GetAtlasTexSize(AtlasWidth, AtlasHeight))
+	{
+		return;
+	}
+
+	const float Cell = Font->GetHeight();
+	if (Cell < EPS || !AtlasWidth || !AtlasHeight)
+	{
+		return;
+	}
+
+	const float InvWidth = 1.0f / float(AtlasWidth);
+	const float InvHeight = 1.0f / float(AtlasHeight);
+
+	float X = 0.0f;
+	for (const char* Cursor = Text; *Cursor; ++Cursor)
+	{
+		const CGameFont::Glyph* Glyph = Font->GetGlyphInfo(u8(*Cursor));
+		if (!Glyph)
+		{
+			continue;
+		}
+
+		if (Cursor != Text)
+		{
+			X += float(Glyph->Abc.abcA);
+		}
+
+		const float Right = X + float(Glyph->Abc.abcB);
+		TextWidth = Right;
+
+		const RECT& Tc = Glyph->TextureCoord;
+		SGlyphQuad& Quad = Quads.emplace_back();
+		Quad.Pos.set(X, float(Glyph->yOffset), Right, Cell + float(Glyph->yOffset));
+		Quad.Uv.set(
+			float(Tc.left) * InvWidth,
+			float(Tc.top) * InvHeight,
+			float(Tc.right) * InvWidth,
+			float(Tc.bottom) * InvHeight
+		);
+
+		X = Right + float(Glyph->Abc.abcC) + Font->GetLetterSpacing();
+	}
+}
+
+void CUIWatchText::SetIntensity(float Intensity)
+{
+	Intensity = clampr(Intensity, 0.0f, 1.0f);
+	const u32 R = u32(clampr(iFloor(float(color_get_R(Color)) * Intensity + 0.5f), 0, 255));
+	const u32 G = u32(clampr(iFloor(float(color_get_G(Color)) * Intensity + 0.5f), 0, 255));
+	const u32 B = u32(clampr(iFloor(float(color_get_B(Color)) * Intensity + 0.5f), 0, 255));
+	const u32 A = u32(clampr(iFloor(float(color_get_A(Color)) * Intensity + 0.5f), 0, 255));
+	DrawColor = color_rgba(R, G, B, A);
+}
+
+void CUIWatchText::Draw()
+{
+	if (Quads.empty() || !Shader->inited())
+	{
+		return;
+	}
+
+	const float Scale = GetHeight() / Font->GetHeight();
+
+	Fvector2 Origin;
+	GetAbsolutePos(Origin);
+	if (Align == EAlign::Center)
+	{
+		Origin.x += (GetWidth() - TextWidth * Scale) * 0.5f;
+	}
+	else if (Align == EAlign::Right)
+	{
+		Origin.x += GetWidth() - TextWidth * Scale;
+	}
+
+	UIRender->SetShader(*Shader);
+	UIRender->StartPrimitive(u32(Quads.size()) * 6, IUIRender::ptTriList, IUIRender::pttLIT);
+	for (const SGlyphQuad& Quad : Quads)
+	{
+		const float X1 = Origin.x + Quad.Pos.x1 * Scale;
+		const float Y1 = Origin.y + Quad.Pos.y1 * Scale;
+		const float X2 = Origin.x + Quad.Pos.x2 * Scale;
+		const float Y2 = Origin.y + Quad.Pos.y2 * Scale;
+
+		UIRender->PushPoint(X1, Y1, 0.0f, DrawColor, Quad.Uv.x1, Quad.Uv.y1);
+		UIRender->PushPoint(X2, Y1, 0.0f, DrawColor, Quad.Uv.x2, Quad.Uv.y1);
+		UIRender->PushPoint(X2, Y2, 0.0f, DrawColor, Quad.Uv.x2, Quad.Uv.y2);
+		UIRender->PushPoint(X1, Y1, 0.0f, DrawColor, Quad.Uv.x1, Quad.Uv.y1);
+		UIRender->PushPoint(X2, Y2, 0.0f, DrawColor, Quad.Uv.x2, Quad.Uv.y2);
+		UIRender->PushPoint(X1, Y2, 0.0f, DrawColor, Quad.Uv.x1, Quad.Uv.y2);
+	}
+	UIRender->FlushPrimitive();
+}
+
+bool CUIWatchWnd::Init(const SWatchConfig& Config)
+{
+	CUIXml Xml;
+
+	string_path XmlPath = {};
+	xr_sprintf(XmlPath, "%s\\%s", UI_PATH, Xml.correct_file_name(UI_PATH, WatchXml).c_str());
+	CXml::RemoveFromCache(CONFIG_PATH, XmlPath);
+
+	if (!Xml.Load(CONFIG_PATH, UI_PATH, WatchXml))
+	{
+		Msg("! [watch] cannot load [%s]", WatchXml);
+		return false;
+	}
+
+	if (!Xml.NavigateToNode("watch", 0))
+	{
+		Msg("! [watch] %s: node <watch> not found", WatchXml);
+		return false;
+	}
+
+	const SWatchDisplay& Display = Config.Display;
+	const SWatchFonts& Fonts = Config.Fonts;
+	Time = CreateText(Xml, "watch:time", Fonts.Time);
+	Date = CreateText(Xml, "watch:date", Fonts.Date);
+	Barometer = CreateText(Xml, "watch:barometer", Fonts.Barometer);
+	BarometerUnit = CreateText(Xml, "watch:barometer_unit", Fonts.BarometerUnit);
+	if (BarometerUnit)
+	{
+		BarometerUnit->SetText(g_pStringTable ? g_pStringTable->translate(Display.BarometerUnit).c_str() : Display.BarometerUnit.c_str());
+		BarometerUnit->Show(false);
+	}
+
+	const bool HasCompassGlow = CreateGlow(Xml, "watch:compass_light", CompassGlow);
+
+	Leds.resize(Config.Leds.size());
+	bool HasLedGlow = false;
+	for (size_t Index = 0; Index < Leds.size(); ++Index)
+	{
+		CreateLed(Xml, Config.Leds[Index].Name, Leds[Index]);
+		HasLedGlow |= !!Leds[Index].Glow.Shader->inited();
+	}
+
+	Gauges.resize(Config.Gauges.size());
+	for (size_t Index = 0; Index < Gauges.size(); ++Index)
+	{
+		CreateGauge(Xml, Config.Gauges[Index].Name, Gauges[Index]);
+	}
+
+	SetLayout(Display);
+	return Time || Date || Barometer || HasCompassGlow || HasLedGlow;
+}
+
+bool CUIWatchWnd::CreateGlow(CUIXml& Xml, const char* Path, SGlow& Glow)
+{
+	if (!Xml.NavigateToNode(Path, 0))
+	{
+		return false;
+	}
+
+	Glow.Color = CUIXmlInit::GetColor(Xml, Path, 0, Glow.Color);
+	const char* Texture = Xml.ReadAttrib(Path, 0, "texture", "");
+	const bool Textured = Texture[0] != 0;
+	Glow.Shader->create(Xml.ReadAttrib(Path, 0, "shader", Textured ? WatchGlowTexShader : WatchGlowShader), Textured ? Texture : nullptr);
+	return Glow.Shader->inited();
+}
+
+void CUIWatchWnd::CreateLed(CUIXml& Xml, const shared_str& Name, SLed& Led)
+{
+	string128 Path = {};
+
+	Led.Glow.Color = WatchDetail::LedFallbackColor(Name);
+	xr_sprintf(Path, "watch:%s_indicator", Name.c_str());
+	if (!CreateGlow(Xml, Path, Led.Glow))
+	{
+		Led.Glow.Shader->create(WatchGlowShader, nullptr);
+	}
+
+	xr_sprintf(Path, "watch:%s_glass", Name.c_str());
+	if (Xml.NavigateToNode(Path, 0))
+	{
+		Led.LitAlpha = u32(clampr(Xml.ReadAttribInt(Path, 0, "lit", int(WatchGlassDefaultLitAlpha)), 0, 255));
+		Led.Glass->create(Xml.ReadAttrib(Path, 0, "shader", WatchGlassShader));
+		Led.Core->create(Xml.ReadAttrib(Path, 0, "core_shader", WatchLedShader));
+		return;
+	}
+
+	Led.LitAlpha = WatchGlassDefaultLitAlpha;
+	Led.Glass->create(WatchGlassShader);
+	Led.Core->create(WatchLedShader);
+}
+
+void CUIWatchWnd::CreateGauge(CUIXml& Xml, const shared_str& Name, SGauge& Gauge)
+{
+	const u32 Fallback = WatchDetail::GaugeFallbackColor(Name);
+	Gauge.Icon.Color = Fallback;
+	Gauge.Bar.Color = Fallback;
+
+	string128 IconPath = {};
+	string128 BarPath = {};
+	xr_sprintf(IconPath, "watch:%s_icon", Name.c_str());
+	xr_sprintf(BarPath, "watch:%s_bar", Name.c_str());
+
+	Gauge.IconOk = CreateGlow(Xml, IconPath, Gauge.Icon);
+	Gauge.BarOk = CreateGlow(Xml, BarPath, Gauge.Bar);
+	if (Xml.NavigateToNode(BarPath, 0))
+	{
+		const char* FillText = Xml.ReadAttrib(BarPath, 0, "fill", "l");
+		Gauge.Fill = (FillText[0] == 'r') ? EBarFill::Right : EBarFill::Left;
+	}
+}
+
+void CUIWatchWnd::SetLayout(const SWatchDisplay& Display)
+{
+	auto ApplyLambda = [](CUIWatchText* Text, const Fvector4& Rect)
+	{
+		if (Text)
+		{
+			Text->SetWndPos(Fvector2().set(Rect.x, Rect.y));
+			Text->SetWndSize(Fvector2().set(Rect.z, Rect.w));
+		}
+	};
+
+	ApplyLambda(Time, Display.UiTime);
+	ApplyLambda(Date, Display.UiDate);
+	ApplyLambda(Barometer, Display.UiBarometer);
+	ApplyLambda(BarometerUnit, Display.UiBarometerUnit);
+}
+
+CUIWatchText* CUIWatchWnd::CreateText(CUIXml& Xml, const char* Path, const shared_str& FontName)
+{
+	if (!Xml.NavigateToNode(Path, 0))
+	{
+		return nullptr;
+	}
+
+	CUIWatchText* Text = new CUIWatchText();
+	if (!Text->Init(Xml, Path, FontName))
+	{
+		xr_delete(Text);
+		return nullptr;
+	}
+
+	Text->SetAutoDelete(true);
+	AttachChild(Text);
+	return Text;
+}
+
+void CUIWatchWnd::SetTime(const char* Text)
+{
+	if (Time)
+	{
+		Time->SetText(Text);
+	}
+}
+
+void CUIWatchWnd::SetDate(const char* Text)
+{
+	if (Date)
+	{
+		Date->SetText(Text);
+	}
+}
+
+void CUIWatchWnd::SetBarometer(const char* Text)
+{
+	if (Barometer)
+	{
+		Barometer->SetText(Text);
+	}
+	if (BarometerUnit)
+	{
+		BarometerUnit->Show(Text && *Text);
+	}
+}
+
+void CUIWatchWnd::SetIntensity(float Intensity)
+{
+	for (CUIWatchText* Text : {Time, Date, Barometer, BarometerUnit})
+	{
+		if (Text)
+		{
+			Text->SetIntensity(Intensity);
+		}
+	}
+}
+
+void CUIWatchWnd::Render(const Fmatrix& Xform)
+{
+	const IUIRender::ePointType PointType = UI().m_currentPointType;
+	UI().m_currentPointType = IUIRender::pttLIT;
+
+	UIRender->CacheSetXformWorld(Xform);
+	UIRender->CacheSetCullMode(ERHI_CULLMODE::NONE);
+
+	CUIWindow::Draw();
+
+	UIRender->CacheSetCullMode(ERHI_CULLMODE::BACK);
+	UI().m_currentPointType = PointType;
+}
+
+void CUIWatchWnd::RenderGlowShader(SGlow& Glow, const Fmatrix& Xform, const Fvector2& Size, float Intensity, float U0, float U1, u32 Color)
+{
+	const u32 Alpha = iFloor(float(color_get_A(Color)) * clampr(Intensity, 0.0f, 1.0f) + 0.5f);
+	if (!Alpha || !Glow.Shader->inited() || Size.x <= EPS || Size.y <= EPS)
+	{
+		return;
+	}
+
+	const u32 DrawColor = subst_alpha(Color, Alpha);
+	const float HalfWidth = Size.x * 0.5f;
+	const float HalfHeight = Size.y * 0.5f;
+
+	UIRender->CacheSetXformWorld(Xform);
+	UIRender->CacheSetCullMode(ERHI_CULLMODE::NONE);
+	UIRender->SetShader(*Glow.Shader);
+	UIRender->StartPrimitive(6, IUIRender::ptTriList, IUIRender::pttLIT);
+	UIRender->PushPoint(-HalfWidth, -HalfHeight, 0.0f, DrawColor, U0, 0.0f);
+	UIRender->PushPoint(HalfWidth, -HalfHeight, 0.0f, DrawColor, U1, 0.0f);
+	UIRender->PushPoint(HalfWidth, HalfHeight, 0.0f, DrawColor, U1, 1.0f);
+	UIRender->PushPoint(-HalfWidth, -HalfHeight, 0.0f, DrawColor, U0, 0.0f);
+	UIRender->PushPoint(HalfWidth, HalfHeight, 0.0f, DrawColor, U1, 1.0f);
+	UIRender->PushPoint(-HalfWidth, HalfHeight, 0.0f, DrawColor, U0, 1.0f);
+	UIRender->FlushPrimitive();
+	UIRender->CacheSetCullMode(ERHI_CULLMODE::BACK);
+}
+
+void CUIWatchWnd::RenderCompassGlow(const Fmatrix& Xform, const Fvector2& Size, float Intensity, u32 Color)
+{
+	RenderGlowShader(CompassGlow, Xform, Size, Intensity, 0.0f, 1.0f, Color);
+}
+
+u32 CUIWatchWnd::GetCompassColor() const
+{
+	return CompassGlow.Color;
+}
+
+void CUIWatchWnd::RenderLedGlow(u32 Led, const Fmatrix& Xform, const Fvector2& Size, float Intensity)
+{
+	if (Led < Leds.size())
+	{
+		RenderGlowShader(Leds[Led].Glow, Xform, Size, Intensity, 0.0f, 1.0f, Leds[Led].Glow.Color);
+	}
+}
+
+u32 CUIWatchWnd::GetLedColor(u32 Led) const
+{
+	return Led < Leds.size() ? Leds[Led].Glow.Color : WatchDetail::DefaultLedRgba;
+}
+
+void CUIWatchWnd::RenderGaugeIcon(u32 Gauge, const Fmatrix& Xform, const Fvector2& Size, float Intensity, u32 Color)
+{
+	if (Gauge < Gauges.size() && Gauges[Gauge].IconOk)
+	{
+		RenderGlowShader(Gauges[Gauge].Icon, Xform, Size, Intensity, 0.0f, 1.0f, Color);
+	}
+}
+
+void CUIWatchWnd::RenderGaugeBar(u32 Gauge, const Fmatrix& Xform, const Fvector2& Size, float Fill, float Intensity, u32 Color)
+{
+	if (Gauge >= Gauges.size())
+	{
+		return;
+	}
+
+	SGauge& Visual = Gauges[Gauge];
+	Fill = clampr(Fill, 0.0f, 1.0f);
+	if (!Visual.BarOk || Fill <= EPS)
+	{
+		return;
+	}
+
+	Fvector2 FillSize = Size;
+	FillSize.x *= Fill;
+
+	const float Shift = Size.x * 0.5f * (1.0f - Fill);
+	Fmatrix Local = Fidentity;
+	Local.translate_over(Visual.Fill == EBarFill::Right ? Shift : -Shift, 0.0f, 0.0f);
+	Fmatrix FillXform;
+	FillXform.mul(Xform, Local);
+
+	const float U0 = (Visual.Fill == EBarFill::Right) ? (1.0f - Fill) : 0.0f;
+	const float U1 = (Visual.Fill == EBarFill::Right) ? 1.0f : Fill;
+	RenderGlowShader(Visual.Bar, FillXform, FillSize, Intensity, U0, U1, Color);
+}
+
+u32 CUIWatchWnd::GetGaugeIconColor(u32 Gauge) const
+{
+	return Gauge < Gauges.size() ? Gauges[Gauge].Icon.Color : WatchDetail::DefaultGaugeRgba;
+}
+
+u32 CUIWatchWnd::GetGaugeBarColor(u32 Gauge) const
+{
+	return Gauge < Gauges.size() ? Gauges[Gauge].Bar.Color : WatchDetail::DefaultGaugeRgba;
+}
+
+bool CUIWatchWnd::HasGaugeIcon(u32 Gauge) const
+{
+	return Gauge < Gauges.size() && Gauges[Gauge].IconOk;
+}
+
+bool CUIWatchWnd::HasGaugeBar(u32 Gauge) const
+{
+	return Gauge < Gauges.size() && Gauges[Gauge].BarOk;
+}
+
+void CUIWatchWnd::BuildLedGeometry(SLed& Led, const Fvector2& GlassSize)
+{
+	Led.GeometrySize = GlassSize;
+	Led.Segments.clear();
+
+	const float HalfLength = GlassSize.x * 0.5f;
+	const float Radius = GlassSize.y;
+	const SLedCircle& Circle = LedCircle();
+	for (u32 Index = 0; Index < WatchLedSegments; ++Index)
+	{
+		const Fvector N0 = {0.0f, Circle.Points[Index].x, Circle.Points[Index].y};
+		const Fvector N1 = {0.0f, Circle.Points[Index + 1].x, Circle.Points[Index + 1].y};
+
+		SLedSegment& Segment = Led.Segments.emplace_back();
+		Segment.P00.set(-HalfLength, N0.y * Radius, N0.z * Radius);
+		Segment.P01.set(HalfLength, N0.y * Radius, N0.z * Radius);
+		Segment.P10.set(-HalfLength, N1.y * Radius, N1.z * Radius);
+		Segment.P11.set(HalfLength, N1.y * Radius, N1.z * Radius);
+		Segment.SideNormal.add(N0, N1).normalize_safe();
+		Segment.N0.set(N0.y, N0.z);
+		Segment.N1.set(N1.y, N1.z);
+	}
+}
+
+void CUIWatchWnd::RenderLed(u32 Led, const Fmatrix& Xform, const Fvector2& GlassSize, const Fvector2& CoreSize, float Intensity, float Brightness)
+{
+	if (Led >= Leds.size())
+	{
+		return;
+	}
+
+	SLed& Visual = Leds[Led];
+	if (!Visual.Glass->inited())
+	{
+		return;
+	}
+
+	if (!Visual.GeometrySize.similar(GlassSize, EPS_S))
+	{
+		BuildLedGeometry(Visual, GlassSize);
+	}
+
+	Fmatrix InvXform;
+	InvXform.invert(Xform);
+	Fvector Eye;
+	InvXform.transform_tiny(Eye, Device.vCameraPosition);
+
+	const float Lit = clampr(Intensity, 0.0f, 1.0f);
+	const u32 GlassColor = subst_alpha(Visual.Glow.Color, u32(iFloor(float(Visual.LitAlpha) * Lit + 0.5f)));
+	const float HalfLength = GlassSize.x * 0.5f;
+	const float Radius = GlassSize.y;
+
+	SLedVertex Back[WatchLedMaxVerts];
+	SLedVertex Front[WatchLedMaxVerts];
+	u32 BackCount = 0;
+	u32 FrontCount = 0;
+
+	auto PushLambda = [&](bool Facing, const Fvector& P, float Nu, float Nv)
+	{
+		SLedVertex& V = Facing ? Front[FrontCount++] : Back[BackCount++];
+		V.P = P;
+		V.N.set(Nu, Nv);
+	};
+
+	const Fvector CapC0 = {-HalfLength, 0.0f, 0.0f};
+	const Fvector CapC1 = {HalfLength, 0.0f, 0.0f};
+	const bool CapFacing0 = Eye.x < -HalfLength;
+	const bool CapFacing1 = Eye.x > HalfLength;
+	for (const SLedSegment& Segment : Visual.Segments)
+	{
+		Fvector ToEye;
+		ToEye.mad(Eye, Segment.SideNormal, -Radius);
+		const bool SideFacing = ToEye.dotproduct(Segment.SideNormal) > 0.0f;
+		PushLambda(SideFacing, Segment.P00, Segment.N0.x, Segment.N0.y);
+		PushLambda(SideFacing, Segment.P01, Segment.N0.x, Segment.N0.y);
+		PushLambda(SideFacing, Segment.P11, Segment.N1.x, Segment.N1.y);
+		PushLambda(SideFacing, Segment.P00, Segment.N0.x, Segment.N0.y);
+		PushLambda(SideFacing, Segment.P11, Segment.N1.x, Segment.N1.y);
+		PushLambda(SideFacing, Segment.P10, Segment.N1.x, Segment.N1.y);
+
+		PushLambda(CapFacing0, CapC0, -WatchGlassCapNormal, 0.0f);
+		PushLambda(CapFacing0, Segment.P10, -WatchGlassCapNormal, 0.0f);
+		PushLambda(CapFacing0, Segment.P00, -WatchGlassCapNormal, 0.0f);
+		PushLambda(CapFacing1, CapC1, WatchGlassCapNormal, 0.0f);
+		PushLambda(CapFacing1, Segment.P01, WatchGlassCapNormal, 0.0f);
+		PushLambda(CapFacing1, Segment.P11, WatchGlassCapNormal, 0.0f);
+	}
+
+	auto FlushLambda = [&](const SLedVertex* Verts, u32 Count)
+	{
+		if (!Count)
+		{
+			return;
+		}
+
+		UIRender->SetShader(*Visual.Glass);
+		UIRender->StartPrimitive(Count, IUIRender::ptTriList, IUIRender::pttLIT);
+		for (u32 Index = 0; Index < Count; ++Index)
+		{
+			UIRender->PushPoint(Verts[Index].P.x, Verts[Index].P.y, Verts[Index].P.z, GlassColor, Verts[Index].N.x, Verts[Index].N.y);
+		}
+		UIRender->FlushPrimitive();
+	};
+
+	UIRender->CacheSetXformWorld(Xform);
+	UIRender->CacheSetCullMode(ERHI_CULLMODE::NONE);
+	FlushLambda(Back, BackCount);
+
+	const u32 Gain = u32(iFloor(255.0f * clampr(Lit * Brightness / WatchLedMaxBrightness, 0.0f, 1.0f) + 0.5f));
+	if (Gain && Visual.Core->inited())
+	{
+		Fvector View = Eye;
+		View.normalize_safe();
+		Fvector Axis = {1.0f, 0.0f, 0.0f};
+		Axis.mad(View, -View.x);
+		if (Axis.square_magnitude() < EPS_S)
+		{
+			Axis.set(0.0f, 1.0f, 0.0f);
+		}
+		Axis.normalize();
+		Fvector Side;
+		Side.crossproduct(View, Axis).normalize_safe();
+		Axis.mul(CoreSize.x * 0.5f);
+		Side.mul(CoreSize.y * 0.5f);
+
+		const u32 Color = subst_alpha(Visual.Glow.Color, Gain);
+		const Fvector C00 = Fvector().sub(Fvector().invert(Axis), Side);
+		const Fvector C10 = Fvector().sub(Axis, Side);
+		const Fvector C11 = Fvector().add(Axis, Side);
+		const Fvector C01 = Fvector().sub(Side, Axis);
+
+		UIRender->SetShader(*Visual.Core);
+		UIRender->StartPrimitive(6, IUIRender::ptTriList, IUIRender::pttLIT);
+		UIRender->PushPoint(C00.x, C00.y, C00.z, Color, 0.0f, 0.0f);
+		UIRender->PushPoint(C10.x, C10.y, C10.z, Color, 1.0f, 0.0f);
+		UIRender->PushPoint(C11.x, C11.y, C11.z, Color, 1.0f, 1.0f);
+		UIRender->PushPoint(C00.x, C00.y, C00.z, Color, 0.0f, 0.0f);
+		UIRender->PushPoint(C11.x, C11.y, C11.z, Color, 1.0f, 1.0f);
+		UIRender->PushPoint(C01.x, C01.y, C01.z, Color, 0.0f, 1.0f);
+		UIRender->FlushPrimitive();
+	}
+
+	FlushLambda(Front, FrontCount);
+	UIRender->CacheSetCullMode(ERHI_CULLMODE::BACK);
+}

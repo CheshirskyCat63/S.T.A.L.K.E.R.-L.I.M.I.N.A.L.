@@ -1,0 +1,61 @@
+#pragma once
+#include "../../xrUI/ui_defs.h"
+#include "../xrSound/Recorder/SoundVoiceChat.h"
+#include "VoiceSender.h"
+
+class CVoiceChat
+{
+private:
+
+	struct SVoiceIconInfo
+	{
+		u64 time;
+
+		SVoiceIconInfo() = default;
+		SVoiceIconInfo(u64 _time)
+		{
+			time = _time;
+		}
+	};
+
+	typedef xr_map<ALife::_OBJECT_ID, IStreamPlayer*> SOUND_PLAYERS;
+	typedef xr_map<ALife::_OBJECT_ID, SVoiceIconInfo> PLAYERS_VOICE_TIME;
+
+public:
+	CVoiceChat();
+	~CVoiceChat();
+
+	bool CreateRecorder();
+
+	void Start();
+	void Stop();
+	bool IsStarted();
+
+	u8 GetDistance() const;
+	u8 SwitchDistance();
+
+	void Update();
+	void OnRender();
+
+	void ReceiveMessage(NET_Packet* P);
+
+private:
+	const ui_shader& GetVoiceIndicatorShader();
+
+	IStreamPlayer* GetStreamPlayer(ALife::_OBJECT_ID clientId);
+
+	void CheckAndClearPlayers(SOUND_PLAYERS& players);
+
+private:
+	float m_buffer[1024];
+
+	ISoundVoiceChat* m_pSoundVoiceChat = nullptr;
+	ISoundRecorder* m_pRecorder = nullptr;
+
+	CVoiceSender* m_pSender = nullptr;
+	SOUND_PLAYERS m_soundPlayersMap;
+
+	PLAYERS_VOICE_TIME m_voiceTimeMap;
+
+	ui_shader m_voiceIndicatorShader;
+};

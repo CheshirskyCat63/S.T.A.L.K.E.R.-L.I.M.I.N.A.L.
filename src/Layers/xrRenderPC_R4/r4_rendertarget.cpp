@@ -1,0 +1,1256 @@
+#include "stdafx.h"
+
+#include "../xrRender/ResourceManager.h"
+#include "blender_light_occq.h"
+#include "blender_light_mask.h"
+#include "blender_light_direct.h"
+#include "blender_light_point.h"
+#include "blender_light_spot.h"
+#include "blender_light_reflected.h"
+#include "blender_combine.h"
+#include "../xrRender/blender_screen_postprocess.h"
+#include "blender_ssao.h"
+#include "blender_scale.h"
+#include "blender_cas.h"
+#include "blender_gtao.h"
+#include "blender_taa.h"
+#include "BlenderGasMask.h"
+#include "blender_nvg.h"
+#include "blender_sslr.h"
+
+#include "blender_bloom_downsample.h"
+#include "blender_bloom_upsample.h"
+#include "blender_new_adaptation.h"
+#include "blender_new_dof.h"
+
+#include "../xrRenderDX10/DX10 Rain/dx10RainBlender.h"
+#include "../xrRender/blender_fxaa.h"
+#include "../xrRender/blender_smaa.h"
+#include "BlenderGamma.h"
+#include "../xrRender/dxRenderDeviceRender.h"
+
+#include "OverlayAPI/FSR3Wrapper.h"
+#include "OverlayAPI/DLSSWrapper.h"
+#include "OverlayAPI/XESSWrapper.h"
+
+static RHIInputElementDesc ShaderDeclXYZ[] =
+{
+	{ "POSITION", 0, ERHI_FORMAT::R32G32B32_FLOAT,		0, 0, ERHI_INPUT_CLASSIFICATION::VERTEX_DATA, 0 }
+};
+static RHIInputElementDesc InputDecl[] =
+{
+	{ "POSITION", 0, ERHI_FORMAT::R32G32B32A32_FLOAT,	0, 0, ERHI_INPUT_CLASSIFICATION::VERTEX_DATA, 0 }
+};
+
+void CRenderTarget::u_setrt(const ref_rt& _1, const ref_rt& _2, const ref_rt& _3, const ref_rt& _4, IRHIDepthStencilView* zb)
+{
+	VERIFY(_1 || zb);
+
+	if (_1)
+	{
+		dwWidth = _1->dwWidth;
+		dwHeight = _1->dwHeight;
+	}
+	else
+	{
+		VERIFY(zb->GetDimension() == ERHI_DSV_DIMENSION::TEXTURE2D);
+		dwWidth = zb->GetSurface()->GetWidth();
+		dwHeight = zb->GetSurface()->GetHeight();
+	}
+
+	RCache.set_RT(_1 ? _1->pRT : NULL, 0);
+	RCache.set_RT(_2 ? _2->pRT : NULL, 1);
+	RCache.set_RT(_3 ? _3->pRT : NULL, 2);
+	RCache.set_RT(_4 ? _4->pRT : NULL, 3);
+	GRHI->SetDepthStencilView(zb);
+}
+
+void CRenderTarget::u_setrt(const ref_rt& _1, const ref_rt& _2, const ref_rt& _3, IRHIDepthStencilView* zb)
+{
+	VERIFY(_1 || zb);
+	if (_1)
+	{
+		dwWidth = _1->dwWidth;
+		dwHeight = _1->dwHeight;
+	}
+	else
+	{
+		VERIFY(zb->GetSurface() != nullptr);
+		dwWidth = zb->GetSurface()->GetWidth();
+		dwHeight = zb->GetSurface()->GetHeight();
+	}
+
+	if (_1) RCache.set_RT(_1->pRT, 0); else RCache.set_RT(nullptr, 0);
+	if (_2) RCache.set_RT(_2->pRT, 1); else RCache.set_RT(nullptr, 1);
+	if (_3) RCache.set_RT(_3->pRT, 2); else RCache.set_RT(nullptr, 2);
+	RCache.set_RT(nullptr, 3);
+
+	GRHI->SetDepthStencilView(zb);
+}
+
+void CRenderTarget::u_setrt(const ref_rt& _1, const ref_rt& _2, IRHIDepthStencilView* zb)
+{
+	VERIFY(_1 || zb);
+	if (_1)
+	{
+		dwWidth = _1->dwWidth;
+		dwHeight = _1->dwHeight;
+	}
+	else
+	{
+		VERIFY(zb->GetDimension() == ERHI_DSV_DIMENSION::TEXTURE2D);
+		dwWidth = zb->GetSurface()->GetWidth();
+		dwHeight = zb->GetSurface()->GetHeight();
+	}
+
+	if (_1) RCache.set_RT(_1->pRT, 0); else RCache.set_RT(nullptr, 0);
+	if (_2) RCache.set_RT(_2->pRT, 1); else RCache.set_RT(nullptr, 1);
+	RCache.set_RT(nullptr, 2);
+	RCache.set_RT(nullptr, 3);
+
+	GRHI->SetDepthStencilView(zb);
+}
+
+void CRenderTarget::u_setrt(u32 W, u32 H, IRHIRenderTargetView* _1, IRHIRenderTargetView* _2, IRHIRenderTargetView* _3, IRHIDepthStencilView* zb)
+{
+	dwWidth = W;
+	dwHeight = H;
+
+	RCache.set_RT(_1, 0);
+	RCache.set_RT(_2, 1);
+	RCache.set_RT(_3, 2);
+	RCache.set_RT(nullptr, 3);
+
+	GRHI->SetDepthStencilView(zb);
+}
+
+void CRenderTarget::u_setrt(u32 W, u32 H, IRHIRenderTargetView* _1, IRHIRenderTargetView* _2, IRHIRenderTargetView* _3, IRHIRenderTargetView* _4, IRHIDepthStencilView* zb)
+{
+	dwWidth = W;
+	dwHeight = H;
+
+	RCache.set_RT(_1, 0);
+	RCache.set_RT(_2, 1);
+	RCache.set_RT(_3, 2);
+	RCache.set_RT(_4, 3);
+
+	GRHI->SetDepthStencilView(zb);
+}
+
+void	CRenderTarget::u_stencil_optimize	(eStencilOptimizeMode eSOM)
+{
+	//	TODO: DX10: remove half pixel offset?
+	VERIFY	(RImplementation.o.nvstencil);
+	//RCache.set_ColorWriteEnable	(false);
+	u32		Offset;
+	float	_w					= RCache.get_width();
+	float	_h					= RCache.get_height();
+	u32		C					= color_rgba	(255,255,255,255);
+	float	eps					= 0;
+	float	_dw					= 0.5f;
+	float	_dh					= 0.5f;
+	FVF::TL* pv					= (FVF::TL*) RCache.Vertex.Lock	(4,g_combine->vb_stride,Offset);
+	pv->set						(-_dw,		_h-_dh,		eps,	1.f, C, 0, 0);	pv++;
+	pv->set						(-_dw,		-_dh,		eps,	1.f, C, 0, 0);	pv++;
+	pv->set						(_w-_dw,	_h-_dh,		eps,	1.f, C, 0, 0);	pv++;
+	pv->set						(_w-_dw,	-_dh,		eps,	1.f, C, 0, 0);	pv++;
+	RCache.Vertex.Unlock		(4,g_combine->vb_stride);
+	RCache.set_Element			(s_occq->E[1]	);
+
+	switch(eSOM)
+	{
+	case SO_Light:
+		GRHI->StateManager->SetStencilRef(dwLightMarkerID);
+		break;
+	case SO_Combine:
+		GRHI->StateManager->SetStencilRef(0x01);
+		break;
+	default:
+		VERIFY(!"CRenderTarget::u_stencil_optimize. switch no default!");
+	}	
+
+	RCache.set_Geometry			(g_combine		);
+	RCache.Render				(ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_LIST,Offset,0,4,0,2);
+	
+}
+
+// 2D texgen (texture adjustment matrix)
+void	CRenderTarget::u_compute_texgen_screen	(Fmatrix& m_Texgen)
+{
+	//float	_w						= float(Device.TargetWidth);
+	//float	_h						= float(Device.TargetHeight);
+	//float	o_w						= (.5f / _w);
+	//float	o_h						= (.5f / _h);
+	Fmatrix			m_TexelAdjust		= 
+	{
+		0.5f,				0.0f,				0.0f,			0.0f,
+		0.0f,				-0.5f,				0.0f,			0.0f,
+		0.0f,				0.0f,				1.0f,			0.0f,
+		//	Removing half pixel offset
+		//0.5f + o_w,			0.5f + o_h,			0.0f,			1.0f
+		0.5f,				0.5f ,				0.0f,			1.0f
+	};
+	m_Texgen.mul	(m_TexelAdjust,RCache.xforms.m_wvp);
+}
+
+// 2D texgen for jitter (texture adjustment matrix)
+void	CRenderTarget::u_compute_texgen_jitter	(Fmatrix&		m_Texgen_J)
+{
+	// place into	0..1 space
+	Fmatrix			m_TexelAdjust		= 
+	{
+		0.5f,				0.0f,				0.0f,			0.0f,
+		0.0f,				-0.5f,				0.0f,			0.0f,
+		0.0f,				0.0f,				1.0f,			0.0f,
+		0.5f,				0.5f,				0.0f,			1.0f
+	};
+	m_Texgen_J.mul	(m_TexelAdjust,RCache.xforms.m_wvp);
+
+	// rescale - tile it
+	float	scale_X			= RCache.get_width() / float(TEX_jitter);
+	float	scale_Y			= RCache.get_height() / float(TEX_jitter);
+	//float	offset			= (.5f / float(TEX_jitter));
+	m_TexelAdjust.scale			(scale_X,	scale_Y,1.f	);
+	//m_TexelAdjust.translate_over(offset,	offset,	0	);
+	m_Texgen_J.mulA_44			(m_TexelAdjust);
+}
+
+u8		fpack			(float v)				{
+	s32	_v	= iFloor	(((v+1)*.5f)*255.f + .5f);
+	clamp	(_v,0,255);
+	return	u8(_v);
+}
+u8		fpackZ			(float v)				{
+	s32	_v	= iFloor	(std::abs(v)*255.f + .5f);
+	clamp	(_v,0,255);
+	return	u8(_v);
+}
+Fvector	vunpack			(s32 x, s32 y, s32 z)	{
+	Fvector	pck;
+	pck.x	= (float(x)/255.f - .5f)*2.f;
+	pck.y	= (float(y)/255.f - .5f)*2.f;
+	pck.z	= -float(z)/255.f;
+	return	pck;
+}
+Fvector	vunpack			(Ivector src)			{
+	return	vunpack	(src.x,src.y,src.z);
+}
+Ivector	vpack			(Fvector src)
+{
+	Fvector			_v;
+	int	bx			= fpack	(src.x);
+	int by			= fpack	(src.y);
+	int bz			= fpackZ(src.z);
+	// dumb test
+	float	e_best	= flt_max;
+	int		r=bx,g=by,b=bz;
+#ifdef DEBUG
+	int		d=0;
+#else
+	int		d=3;
+#endif
+	for (int x=std::max(bx-d,0); x<=std::min(bx+d,255); x++)
+	for (int y=std::max(by-d,0); y<=std::min(by+d,255); y++)
+	for (int z=std::max(bz-d,0); z<=std::min(bz+d,255); z++)
+	{
+		_v				= vunpack(x,y,z);
+		float	m		= _v.magnitude();
+		float	me		= std::abs(m-1.f);
+		if	(me>0.03f)	continue;
+		_v.div	(m);
+		float	e		= std::abs(src.dotproduct(_v)-1.f);
+		if (e<e_best)	{
+			e_best		= e;
+			r=x,g=y,b=z;
+		}
+	}
+	Ivector		ipck;
+	ipck.set	(r,g,b);
+	return		ipck;
+}
+
+void	generate_jitter	(DWORD*	dest, u32 elem_count)
+{
+	const	int		cmax		= 8;
+	FixedVector<Ivector2,cmax>		samples;
+	while (samples.size()<elem_count*2)
+	{
+		Ivector2	test;
+		test.set	(::Random.randI(0,256),::Random.randI(0,256));
+		bool		valid = true;
+		for (u32 t=0; t<samples.size(); t++)
+		{
+			int		dist	= std::abs(test.x-samples[t].x)+ std::abs(test.y-samples[t].y);
+			if (dist<32)	{
+				valid		= false;
+				break;
+			}
+		}
+		if (valid)	samples.push_back	(test);
+	}
+	for	(u32 it=0; it<elem_count; it++, dest++)
+		*dest	= color_rgba(samples[2*it].x,samples[2*it].y,samples[2*it+1].y,samples[2*it+1].x);
+}
+
+u32 CRenderTarget::get_width()
+{
+	return dwWidth;
+}
+
+u32 CRenderTarget::get_height()
+{
+	return dwHeight;
+}
+
+u32 CRenderTarget::get_core_width()
+{
+	return (u32)RCache.get_width();
+}
+
+u32 CRenderTarget::get_core_height()
+{
+	return (u32)RCache.get_height();
+}
+
+u32 CRenderTarget::get_target_width()
+{
+	return (u32)RCache.get_target_width();
+}
+
+u32 CRenderTarget::get_target_height()
+{
+	return (u32)RCache.get_target_height();
+}
+
+xr_map<xr_string, float> PowerMap;
+
+CRenderTarget::CRenderTarget()
+{
+	if (g_debug_blend_state == nullptr) {
+		D3D11_BLEND_DESC desc;
+		ZeroMemory(&desc, sizeof(desc));
+		desc.AlphaToCoverageEnable = false;
+		desc.RenderTarget[0].BlendEnable = false;
+		desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+		desc.RenderTarget[0].DestBlend = D3D11_BLEND_DEST_COLOR;
+		desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+		desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+		desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+		desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+		desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		R_CHK(RDevice->CreateBlendState(&desc, &g_debug_blend_state));
+	}
+
+	CImGuiManager::Instance().Subscribe("GraphicDebug", CImGuiManager::ERenderPriority::eMedium, [this]()
+	{
+		if (!Engine.External.EditorStates[static_cast<std::uint8_t>(EditorUI::Shaders)])
+		{
+			GRHI->GPUStatsEnable = false;
+			return;
+		}
+
+		auto State = g_debug_blend_state;
+		auto DisplaySRV = [State](const ref_texture& rt, bool& ShowData)
+			{
+				if (rt._get() == nullptr || rt->get_SRView() == nullptr)
+				{
+					return;
+				}
+
+				string64 ShowText = {};
+				sprintf(ShowText, "Show ##%p", (void*)&ShowData);
+
+				ImGui::Checkbox(ShowText, &ShowData);
+				ImGui::SameLine();
+
+				auto& Texture = *rt;
+
+				ImGui::Text
+				(
+					"Target %s (fmt: %s, width: %i, height: %i)",
+					Texture.cName.c_str(), magic_enum::enum_name(Texture.get_Format()).data(), Texture.get_Width(), Texture.get_Height()
+				);
+
+				if (!ShowData)
+					return;
+
+				auto ContentRegion = ImGui::GetContentRegionAvail();
+				float scale = ImGui::GetContentRegionAvail().x / Texture.get_Width();
+				auto& DrawList = *ImGui::GetWindowDrawList();
+
+				if (!PowerMap.contains(Texture.cName.c_str()))
+				{
+					PowerMap[Texture.cName.c_str()] = 1;
+				}
+
+				float& ImagePower = PowerMap[Texture.cName.c_str()];
+				ImGui::SliderFloat(Texture.cName.c_str(), &ImagePower, 0.0f, 10.0f);
+
+				DrawList.AddCallback
+				(
+					[](const ImDrawList* parent_list, const ImDrawCmd* cmd)
+					{
+						const float blend_factor[4] = { 0.f, 0.f, 0.f, 0.f };
+						RContext->OMSetBlendState((ID3D11BlendState*)cmd->UserCallbackData, blend_factor, 0xffffffff);
+					},
+					State
+				);
+
+				ImGui::ImageWithBg
+				(
+					rt->get_SRView()->GetRawSRV(),
+					ImVec2(ImGui::GetContentRegionAvail().x, rt->get_Height() * scale),
+					ImVec2(0, 0), ImVec2(1, 1), ImVec4(0,0,0,0), ImVec4(ImagePower, ImagePower, ImagePower, 1.0f)
+				);
+
+				DrawList.AddCallback
+				(
+					[](const ImDrawList* parent_list, const ImDrawCmd* cmd)
+					{
+						auto bd = RHIUtils::ImGui::GetBlenderState();
+						if (bd != nullptr)
+						{
+							const float blend_factor[4] = { 0.f, 0.f, 0.f, 0.f };
+							RContext->OMSetBlendState((ID3D11BlendState*)bd, blend_factor, 0xffffffff);
+						}
+					},
+					State
+				);
+			};
+
+		if (!ImGui::Begin("GraphicDebug", &Engine.External.EditorStates[static_cast<std::uint8_t>(EditorUI::Shaders)], ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse)) {
+			ImGui::End();
+			return;
+		}
+
+#define DisplaySRT(rt) \
+		static bool Show##rt = false; \
+		DisplaySRV(rt, Show##rt);
+
+#define DisplayRT(rt) \
+		static bool Show##rt = false; \
+		DisplaySRV(rt ? rt->pTexture : nullptr, Show##rt);
+
+		DisplayRT(rt_Accumulator);
+		DisplayRT(rt_Revealage);
+		DisplayRT(rt_Forward);
+		DisplayRT(rt_Color);
+		DisplayRT(rt_Normal);
+		DisplayRT(rt_Surface);
+		DisplayRT(rt_Position);
+		DisplayRT(rt_Back_Buffer_AA);
+		DisplayRT(rt_Back_Buffer);
+		DisplayRT(rt_BackbufferLUT);
+		DisplayRT(rt_Generic);
+		DisplayRT(rt_Generic_0);
+		DisplayRT(rt_Generic_1);
+		DisplayRT(rt_Generic_2);
+		DisplayRT(rt_upscaled_depth);
+		DisplayRT(rt_sslr);
+		DisplayRT(rt_sslr_temp);
+		DisplayRT(rt_sslr_data);
+		DisplayRT(rt_ssao_temp);
+		DisplayRT(rt_Velocity);
+		DisplayRT(rt_ui_pda);
+		DisplayRT(rt_Bloom_A);
+		DisplayRT(rt_Bloom_A2);
+		DisplayRT(rt_LUM_A);
+		DisplayRT(rt_LUM_B);
+		DisplayRT(rt_LUM_C);
+		DisplayRT(rt_LUM_D);
+		DisplayRT(rt_smap_surf);
+		DisplayRT(rt_Reflection_forward);
+		DisplayRT(rt_smap_depth);
+		DisplaySRT(rt_smap_depth_sun);
+
+
+#undef DisplayRT
+
+		static int stack_levels = 0;
+		ImGui::SliderInt("Stack Levels", &stack_levels, 0, 8);
+		GRHI->GPUStatsEnable |= stack_levels > 0;
+
+		auto& perf = GRHI->GPUStats();
+		for (size_t i = 0; i < perf.count; i++)
+		{
+			auto& event = perf.events[i];
+			if (event.stack < stack_levels) {
+				u64 time_micros = (event.end - event.begin) / (event.freq / 1000000);
+				float time_milliseconds = (float)time_micros * 0.001f;
+				ImGui::Text("%*s%s: %.3fms", event.stack * 2, " ", event.name.c_str(), time_milliseconds);
+			}
+		}
+
+		ImGui::End();
+	});
+
+	param_blur = 0.f;
+	param_gray = 0.f;
+	param_noise = 0.f;
+	param_duality_h = 0.f;
+	param_duality_v = 0.f;
+	param_noise_fps = 25.f;
+	param_noise_scale = 1.f;
+
+	im_noise_time = 1.0f / 100.0f;
+	im_noise_shift_w = 0;
+	im_noise_shift_h = 0;
+
+	param_color_base = color_rgba(127, 127, 127, 0);
+	param_color_gray = color_rgba(85, 85, 85, 0);
+	//param_color_add		= color_rgba(0,0,0,			0);
+	param_color_add.set(0.0f, 0.0f, 0.0f);
+
+	dwAccumulatorClearMark = 0;
+	dxRenderDeviceRender::Instance().Resources->Evict();
+
+	// Blenders
+	b_occq = new CBlender_light_occq();
+	b_accum_mask = new CBlender_accum_direct_mask();
+	b_accum_direct = new CBlender_accum_direct();
+	b_accum_point = new CBlender_accum_point();
+	b_accum_spot = new CBlender_accum_spot();
+	b_accum_reflected = new CBlender_accum_reflected();
+	b_combine = new CBlender_combine();
+	b_ssao = new CBlender_SSAO();
+
+	CRT::CRTCreationFlags isUAV = RFeatureLevel >= D3D_FEATURE_LEVEL_11_0 ? CRT::USE_UAV_FLAG : (CRT::CRTCreationFlags)NULL;
+
+	u32 s_dwWidth = (u32)RCache.get_width(), s_dwHeight = (u32)RCache.get_height();
+
+	// The editor viewport is not the window: depth has to match the viewport targets
+	if (Device.IsEditorMode())
+	{
+		rt_EditorDepth.create("$user$editor_depth", s_dwWidth, s_dwHeight, ERHI_FORMAT::D24_UNORM_S8_UINT);
+		EditorWindowDepth = GRHI->DevicePtr->RenderDSV;
+		GRHI->DevicePtr->RenderDSV = rt_EditorDepth->pZRT;
+
+		if (s_dwWidth != get_target_width() || s_dwHeight != get_target_height())
+		{
+			rt_EditorOverlayDepth.create("$user$editor_overlay_depth", get_target_width(), get_target_height(), ERHI_FORMAT::D24_UNORM_S8_UINT);
+		}
+	}
+
+	// NORMAL
+	{
+		auto HDR_Format = ERHI_FORMAT::R16G16B16A16_FLOAT;
+
+		auto ColorFormat = ERHI_FORMAT::R8G8B8A8_UNORM;
+		auto SurfaceFormat = ERHI_FORMAT::R8G8B8A8_UNORM;
+
+		auto NormalFormat = ERHI_FORMAT::R10G10B10A2_UNORM;
+
+		if (RImplementation.o.dx11_use_legacy_light)
+		{
+			SurfaceFormat = ERHI_FORMAT::R8_UNORM;
+		}
+
+		rt_Color.create(r2_RT_albedo, s_dwWidth, s_dwHeight, ColorFormat, 1, isUAV);
+		rt_Surface.create(r2_RT_S, s_dwWidth, s_dwHeight, SurfaceFormat, 1, isUAV);
+		rt_Normal.create(r2_RT_N, s_dwWidth, s_dwHeight, NormalFormat, 1, isUAV);
+
+		rt_Accumulator.create(r2_RT_accum, s_dwWidth, s_dwHeight, HDR_Format);
+
+		if(RImplementation.o.dx11_allow_wboit_transparency)
+		{
+			rt_Forward.create(r2_RT_wboit, s_dwWidth, s_dwHeight, HDR_Format);
+			rt_Revealage.create(r2_RT_wboit_revealage, s_dwWidth, s_dwHeight, ERHI_FORMAT::R16_UNORM);
+		}
+
+		rt_Generic_0.create(r2_RT_generic0, s_dwWidth, s_dwHeight, HDR_Format);
+		rt_Generic_2.create(r2_RT_generic2, s_dwWidth, s_dwHeight, HDR_Format);
+
+		rt_Velocity.create(r2_RT_velocity, s_dwWidth, s_dwHeight, ERHI_FORMAT::R16G16_SNORM);
+		rt_Generic_1.create(r2_RT_generic1, s_dwWidth, s_dwHeight, ERHI_FORMAT::R8G8B8A8_UNORM);
+
+		rt_Position.create(r2_RT_P, s_dwWidth, s_dwHeight, RDepth->GetSurface()->GetFormat());
+
+		rt_Back_Buffer_AA.create(r2_RT_backbuffer_AA, get_target_width(), get_target_height(), HDR_Format);
+		rt_Back_Buffer.create(r2_RT_backbuffer_final, get_target_width(), get_target_height(), HDR_Format);
+
+		rt_Generic.create(r2_RT_generic, get_target_width(), get_target_height(), ERHI_FORMAT::R16G16B16A16_FLOAT, 1, isUAV);
+
+		rt_BackbufferLUT.create(r2_RT_backbuffer_lut, get_target_width(), get_target_height(), ERHI_FORMAT::R10G10B10A2_UNORM);
+		rt_ui_pda.create(r_ui_pda, get_target_width(), get_target_height(), ERHI_FORMAT::R16G16B16A16_FLOAT);
+	}
+
+	rt_upscaled_depth.create(r2_RT_upscaled_depth, s_dwWidth, s_dwHeight, ERHI_FORMAT::R16_FLOAT);
+	rt_upscaled_depth_old.create(r2_RT_upscaled_depth_old, s_dwWidth, s_dwHeight, ERHI_FORMAT::R16_FLOAT);
+
+	rt_ui_depth.create(r2_RT_ui_depth, get_target_width() * 2.0f, get_target_height() * 2.0f, ERHI_FORMAT::D16_UNORM);
+	rt_ui_color.create(r2_RT_ui_color, get_target_width() * 2.0f, get_target_height() * 2.0f, ERHI_FORMAT::R16G16B16A16_FLOAT);
+
+	rt_planar_depth.create(r2_RT_planar_depth, s_dwWidth, s_dwHeight, ERHI_FORMAT::D16_UNORM);
+	rt_planar_color.create(r2_RT_planar_color, s_dwWidth, s_dwHeight, ERHI_FORMAT::R11G11B10_FLOAT);
+
+	init_fsr();
+	init_dlss();
+	init_xess();
+
+	// Scale
+	{
+		b_scale = new CBlender_scale();
+		s_scale.create(b_scale);
+	}
+
+	// FXAA
+	{
+		b_fxaa = new CBlender_FXAA();
+		s_fxaa.create(b_fxaa);
+	}
+
+	// Screen Post Process
+	{
+		b_spp = new CBlender_SPP;
+		s_spp.create(b_spp);
+		if (pSettings->section_exist("liminal_bodycam"))
+		{
+			b_bodycam = new CBlender_Bodycam;
+			s_bodycam.create(b_bodycam);
+		}
+
+		b_gasmask = new CBlenderGasMask;
+		s_gasmask.create(b_gasmask);
+	}
+
+	// SMAA
+	{
+		b_smaa = new CBlender_SMAA();
+		s_smaa.create(b_smaa);
+
+		rt_smaa_edgetex.create(r2_RT_smaa_edgetex, s_dwWidth, s_dwHeight, ERHI_FORMAT::R8G8_UNORM);
+		rt_smaa_blendtex.create(r2_RT_smaa_blendtex, s_dwWidth, s_dwHeight, ERHI_FORMAT::R8G8B8A8_UNORM);
+	}
+
+	//Sharpening
+	{
+		b_cas = new CBlender_Sharpening();
+		s_cas.create(b_cas);
+	}
+
+	//Ground-truth based ambient occlusion
+	{
+		b_gtao = new CBlender_gtao();
+		s_gtao.create(b_gtao);
+
+		rt_gtao_0.create("$user$gtao_0", s_dwWidth, s_dwHeight, ERHI_FORMAT::R32_UINT); //AO.view-z
+	}
+
+	//Puddles
+	{
+		s_puddles.create("effects_water_puddles");
+	}
+
+	//TAA
+	{
+		b_taa = new CBlender_taa();
+		s_taa.create(b_taa);
+
+		rt_Generic_0_prev.create(r2_RT_generic0_prev, s_dwWidth, s_dwHeight, ERHI_FORMAT::R16G16B16A16_FLOAT);	
+	}
+
+	// Gamma
+	b_gamma = new CBlender_gamma();
+	s_gamma.create(b_gamma);
+
+	//NVG
+	{
+		b_nvg = new CBlender_nvg();
+		s_nvg.create(b_nvg);
+	}
+
+	//SSLR
+	{
+		if(RImplementation.o.deffered_reflecitons) 
+		{
+			rt_sslr_old.create(r2_RT_sslr_old, s_dwWidth, s_dwHeight, ERHI_FORMAT::R16G16B16A16_FLOAT, 1, CRT::USE_UAV_FLAG);
+			rt_sslr.create(r2_RT_sslr, s_dwWidth, s_dwHeight, ERHI_FORMAT::R16G16B16A16_FLOAT, 1, CRT::USE_UAV_FLAG);
+
+			rt_sslr_data.create(r2_RT_sslr_data, s_dwWidth, s_dwHeight, ERHI_FORMAT::R16G16B16A16_FLOAT, 1, CRT::USE_UAV_FLAG);
+			rt_sslr_temp.create(r2_RT_sslr_temp, s_dwWidth, s_dwHeight, ERHI_FORMAT::R16G16B16A16_FLOAT, 1, CRT::USE_UAV_FLAG);
+
+			rt_sslr_hiz.create(r2_RT_sslr_hiz, s_dwWidth, s_dwHeight, ERHI_FORMAT::R32_FLOAT, 1, CRT::CRTCreationFlags(CRT::USE_UAV_FLAG | CRT::MIPPED_RT_FLAG));
+		}
+
+		if(RImplementation.o.offscreen_reflecitons)
+		{
+			u32 RefSize = 256;
+
+			rt_Reflection.create(r2_RT_env, RefSize, ERHI_FORMAT::R11G11B10_FLOAT); // Color
+			rt_Reflection_temp.create(r2_RT_env_temp, RefSize, ERHI_FORMAT::R16_FLOAT); // Distance2Point
+
+			// Maybe remove rt_Depth? (like LV)
+			rt_Depth.create(r2_RT_env_depth, RefSize, RefSize, ERHI_FORMAT::D16_UNORM);
+			rt_Reflection_forward.create(r2_RT_env_fwd, RefSize * 2u, RefSize * 2u, ERHI_FORMAT::R8G8B8A8_UNORM_SRGB, 1, CRT::CRTCreationFlags::AUTOGEN_MIP_MAPS);
+		}
+		else
+		{
+			rt_Reflection.create(r2_RT_env, 4u, ERHI_FORMAT::R11G11B10_FLOAT); // Color
+			rt_Reflection_temp.create(r2_RT_env_temp, 4u, ERHI_FORMAT::R16_FLOAT); // Distance2Point
+			rt_Reflection_forward.create(r2_RT_env_fwd, 4u, 4u, ERHI_FORMAT::R8G8B8A8_UNORM_SRGB);
+
+			for(auto& pRT : rt_Reflection_temp->pRT)
+			{
+				Fvector4 FogPlane = { 2000, 0, 0, 0 };
+				GRHI->ClearTarget(pRT, &FogPlane.x);
+			}
+
+			Fvector4 Reflections = { 0, 0, 0, 0.75f }; // Hack
+			GRHI->ClearTarget(rt_Reflection_forward->pRT, &Reflections.x);
+		}
+
+		b_sslr = new CBlender_sslr();
+		s_sslr.create(b_sslr);
+	}
+
+	// OCCLUSION
+	s_occq.create(b_occq, "r2\\occq");
+
+	// DIRECT (spot)
+	ERHI_FORMAT depth_format = (ERHI_FORMAT)RImplementation.o.HW_smap_FORMAT;
+
+	u32	size = RImplementation.o.smapsize;
+	rt_smap_depth.create(r2_RT_smap_depth, size, size, depth_format);
+	rt_smap_surf.create(r2_RT_smap_surf, size, size, ERHI_FORMAT::R8G8B8A8_UNORM);
+
+	s_accum_mask.create(b_accum_mask, "r3\\accum_mask");
+	s_accum_direct.create(b_accum_direct, "r3\\accum_direct");
+
+	s_accum_direct_volumetric.create("accum_volumetric_sun");
+
+	{
+		RHITextureDesc TextureDesc = {};
+		TextureDesc.Width = size;
+		TextureDesc.Height = size;
+		TextureDesc.BindFlags = ERHI_BIND_FLAG::DEPTH_STENCIL | ERHI_BIND_FLAG::SHADER_RESOURCE;
+		TextureDesc.Format = ERHI_FORMAT::R32_TYPELESS;
+		TextureDesc.ArraySize = 3;
+		TextureDesc.MipLevels = 1;
+		TextureDesc.CPUAccessFlags = 0;
+		TextureDesc.SampleDescCount = 1;
+		TextureDesc.Usage = ERHI_USAGE::USAGE_DEFAULT;
+
+		//creating a texture
+		RHISubResource Subres = {};
+		rt_smap_depth_sun_tex = GRHI->CreateTexture2D(TextureDesc, Subres);
+
+		//Create DSV for each slice
+		RHIDepthStencilViewDesc depthStencilViewDesc = {};
+		depthStencilViewDesc.ViewDimension = ERHI_DSV_DIMENSION::TEXTURE2DARRAY;
+		depthStencilViewDesc.Format = ERHI_FORMAT::D32_FLOAT;
+		depthStencilViewDesc.ArraySize = 1;
+		depthStencilViewDesc.MipSlice = 0;
+
+		for(int dsv_idx = 0; dsv_idx < 3; dsv_idx++)
+		{
+			depthStencilViewDesc.FirstArraySlice = dsv_idx;
+			rt_smap_depth_sun_dsv[dsv_idx] = GRHI->CreateDepthStencilView(rt_smap_depth_sun_tex, depthStencilViewDesc);
+		}
+
+		//Now bind create SRV for it
+		rt_smap_depth_sun.create(r2_RT_smap_depth_sun);
+		rt_smap_depth_sun->surface_set(rt_smap_depth_sun_tex);
+	}
+
+	//	RAIN
+	//	TODO: DX10: Create resources only when DX10 rain is enabled.
+	//	Or make DX10 rain switch dynamic?
+	{
+		CBlender_rain TempBlender; string_path temp { };
+
+		bool b_rain_mask_texture = FS.exist(temp, "$textures$", "rain_mask", ".dds");
+		b_rain_mask_texture = b_rain_mask_texture || FS.exist(temp, "$level$", "rain_mask", ".dds");
+
+		s_rain.create(&TempBlender, "null", b_rain_mask_texture ? "rain_mask" : nullptr);
+	}
+
+	// POINT
+	{
+		s_accum_point.create(b_accum_point, "r2\\accum_point_s");
+		accum_point_geom_create();
+		g_accum_point.create(ShaderDeclXYZ, std::size(ShaderDeclXYZ), g_accum_point_vb, g_accum_point_ib);
+		accum_omnip_geom_create();
+		g_accum_omnipart.create(ShaderDeclXYZ, std::size(ShaderDeclXYZ), g_accum_omnip_vb, g_accum_omnip_ib);
+	}
+
+	// SPOT
+	{
+		s_accum_spot.create(b_accum_spot, "r2\\accum_spot_s", "lights\\lights_spot01");
+		accum_spot_geom_create();
+		g_accum_spot.create(ShaderDeclXYZ, std::size(ShaderDeclXYZ), g_accum_spot_vb, g_accum_spot_ib);
+	}
+
+	{
+		s_accum_volume.create("accum_volumetric", "lights\\lights_spot01");
+		accum_volumetric_geom_create();
+		g_accum_volumetric.create(ShaderDeclXYZ, std::size(ShaderDeclXYZ), g_accum_volumetric_vb, g_accum_volumetric_ib);
+	}
+
+	string_path name{};
+
+	// REFLECTED
+	{
+		s_accum_reflected.create(b_accum_reflected, "r2\\accum_refl");
+	}
+
+	// New BLOOM and LUM
+	{
+		ERHI_FORMAT	fmt = ERHI_FORMAT::R11G11B10_FLOAT;
+
+		u32 BW_G = std::ceil(Device.TargetWidth / 128.0f), 
+			BH_G = std::ceil(Device.TargetHeight / 128);
+
+		u32 BW_F = BW_G * 2, BH_F = BH_G * 2;
+		u32 BW_E = BW_F * 2, BH_E = BH_F * 2;
+		u32 BW_D = BW_E * 2, BH_D = BH_E * 2;
+		u32 BW_C = BW_D * 2, BH_C = BH_D * 2;
+		u32 BW_B = BW_C * 2, BH_B = BH_C * 2;
+		u32 BW_A = BW_B * 2, BH_A = BH_B * 2;
+
+		b_bloom_downsample = new CBlender_bloom_downsample();
+		b_bloom_upsample = new CBlender_bloom_upsample();
+		s_bloom_downsample.create(b_bloom_downsample);
+		s_bloom_upsample.create(b_bloom_upsample);
+
+		rt_Bloom_A.create(r2_RT_bloomA, BW_A, BH_A, fmt);
+		rt_Bloom_B.create(r2_RT_bloomB, BW_B, BH_B, fmt);
+		rt_Bloom_C.create(r2_RT_bloomC, BW_C, BH_C, fmt);
+		rt_Bloom_D.create(r2_RT_bloomD, BW_D, BH_D, fmt);
+		rt_Bloom_E.create(r2_RT_bloomE, BW_E, BH_E, fmt);
+		rt_Bloom_F.create(r2_RT_bloomF, BW_F, BH_F, fmt);
+		rt_Bloom_G.create(r2_RT_bloomG, BW_G, BH_G, fmt);
+		rt_Bloom_A2.create(r2_RT_bloomA2, BW_A, BH_A, fmt);
+		rt_Bloom_B2.create(r2_RT_bloomB2, BW_B, BH_B, fmt);
+		rt_Bloom_C2.create(r2_RT_bloomC2, BW_C, BH_C, fmt);
+		rt_Bloom_D2.create(r2_RT_bloomD2, BW_D, BH_D, fmt);
+		rt_Bloom_E2.create(r2_RT_bloomE2, BW_E, BH_E, fmt);
+		rt_Bloom_F2.create(r2_RT_bloomF2, BW_F, BH_F, fmt);
+
+		fmt = ERHI_FORMAT::R32_FLOAT;
+		u32 LW_A = 1024, LH_A = 1024;
+		u32 LW_B = LW_A / 8, LH_B = LH_A / 8;
+		u32 LW_C = LW_B / 8, LH_C = LH_B / 8;
+		u32 LW_D = 1, LH_D = 1;
+
+		b_new_adaptation = new CBlender_new_adaptation();
+		s_lum_copy.create(b_new_adaptation);
+
+		rt_LUM_A.create(r2_RT_lumA, LW_A, LH_A, fmt);
+		rt_LUM_B.create(r2_RT_lumB, LW_B, LH_B, fmt);
+		rt_LUM_C.create(r2_RT_lumC, LW_C, LH_C, fmt);
+
+		rt_LUM_D.create(r2_RT_luminance_cur, LW_D, LH_D, fmt);
+
+		GRHI->ClearTarget(rt_LUM_D->pRT, ERTColor::Gray);
+
+		f_bloom_factor = 0.5f;
+	}
+	// new dof
+	
+	{
+		ERHI_FORMAT fmt = ERHI_FORMAT::R32_FLOAT;
+		u32 FW = 1, FH = 1;
+		rt_dof_focus.create(r2_RT_dof_focus, FW, FH, fmt);
+		rt_dof_focus_prev.create(r2_RT_dof_focus_prev, FW, FH, fmt);
+
+		GRHI->ClearTarget(rt_dof_focus->pRT, ERTColor::Gray);
+		GRHI->ClearTarget(rt_dof_focus_prev->pRT, ERTColor::Gray);
+		//fmt = ERHI_FORMAT::R16G16B16A16_FLOAT;
+		u32 CoCW = Device.TargetWidth, CoCH = Device.TargetHeight;
+		rt_dof_coc.create(r2_RT_dof_coc, CoCW, CoCH, fmt);
+		rt_dof_coc_prev.create(r2_RT_dof_coc_prev, CoCW, CoCH, fmt);
+
+		fmt = ERHI_FORMAT::R16G16B16A16_FLOAT;
+		rt_dof_blur1.create(r2_RT_dof_blur1, CoCW, CoCH, fmt);
+
+		b_new_dof = new CBlender_new_dof();
+
+		s_dof_coc.create(b_new_dof);
+	}
+
+	// HBAO
+	{
+		u32 w = s_dwWidth / 2;
+		u32 h = s_dwHeight / 2;
+		rt_half_depth.create(r2_RT_half_depth, w, h, ERHI_FORMAT::R16_FLOAT);
+	}
+
+	s_ssao.create(b_ssao, "r2\\ssao");
+	rt_ssao_temp.create(r2_RT_ssao_temp, s_dwWidth, s_dwHeight, ERHI_FORMAT::R8_UNORM, 1);
+
+	// COMBINE
+	{
+
+		s_combine.create(b_combine, "r2\\combine");
+		s_combine_volumetric.create("combine_volumetric");
+
+		g_combine_VP.create(InputDecl, std::size(InputDecl), RCache.Vertex.Buffer(), RCache.QuadIB);
+		g_combine_cuboid.create(InputDecl, std::size(InputDecl), RCache.Vertex.Buffer(), RCache.Index.Buffer());
+
+		g_combine.create(FVF::F_TL, RCache.Vertex.Buffer(), RCache.QuadIB);
+		g_combine_2UV.create(FVF::F_TL2uv, RCache.Vertex.Buffer(), RCache.QuadIB);
+
+		u32 fvf_aa_AA = D3DFVF_XYZRHW | D3DFVF_TEX7 | D3DFVF_TEXCOORDSIZE2(0) | D3DFVF_TEXCOORDSIZE2(1) | D3DFVF_TEXCOORDSIZE2(2) | D3DFVF_TEXCOORDSIZE2(3) | D3DFVF_TEXCOORDSIZE2(4) | D3DFVF_TEXCOORDSIZE4(5) | D3DFVF_TEXCOORDSIZE4(6);
+		g_aa_AA.create(fvf_aa_AA, RCache.Vertex.Buffer(), RCache.QuadIB);
+
+		t_envmap_0.create(r2_T_envs0);
+		t_envmap_1.create(r2_T_envs1);
+	}
+
+	// Build textures
+	{
+		// Testure for async sreenshots
+		{
+			D3D_TEXTURE2D_DESC	desc;
+			desc.Width = s_dwWidth;
+			desc.Height = s_dwHeight;
+			desc.MipLevels = 1;
+			desc.ArraySize = 1;
+			desc.SampleDesc.Count = 1;
+			desc.SampleDesc.Quality = 0;
+			desc.Format = DXGI_FORMAT_R8G8B8A8_SNORM;
+			desc.Usage = D3D_USAGE_STAGING;
+			desc.BindFlags = 0;
+			desc.CPUAccessFlags = D3D_CPU_ACCESS_READ;
+			desc.MiscFlags = 0;
+
+			R_CHK( RDevice->CreateTexture2D(&desc, 0, &t_ss_async) );
+		}
+		// Build material(s)
+		{
+			u16	tempData[TEX_material_LdotN * TEX_material_LdotH * TEX_material_Count];
+
+			D3D_TEXTURE3D_DESC	desc;
+			desc.Width = TEX_material_LdotN;
+			desc.Height = TEX_material_LdotH;
+			desc.Depth	= TEX_material_Count;
+			desc.MipLevels = 1;
+			desc.Format = DXGI_FORMAT_R8G8_UNORM;
+			desc.Usage = D3D_USAGE_IMMUTABLE;
+			desc.BindFlags = D3D_BIND_SHADER_RESOURCE;
+			desc.CPUAccessFlags = 0;
+			desc.MiscFlags = 0;
+
+			D3D_SUBRESOURCE_DATA	subData;
+
+			subData.pSysMem = tempData;
+			subData.SysMemPitch = desc.Width*2;
+			subData.SysMemSlicePitch = desc.Height*subData.SysMemPitch;
+
+			for (u32 slice=0; slice<TEX_material_Count; slice++)
+			{
+				for (u32 y=0; y<TEX_material_LdotH; y++)
+				{
+					for (u32 x=0; x<TEX_material_LdotN; x++)
+					{
+						u16*	p	=	(u16*)		
+							(LPBYTE (subData.pSysMem) 
+							+ slice*subData.SysMemSlicePitch 
+							+ y*subData.SysMemPitch + x*2);
+						float	ld	=	float(x)	/ float	(TEX_material_LdotN-1);
+						float	ls	=	float(y)	/ float	(TEX_material_LdotH-1) + EPS_S;
+						ls			*=	powf(ld,1/32.f);
+						float	fd,fs;
+
+						switch	(slice)
+						{
+						case 0:	{ // looks like OrenNayar
+							fd	= powf(ld,0.75f);		// 0.75
+							fs	= powf(ls,16.f)*.5f;
+								}	break;
+						case 1:	{// looks like Blinn
+							fd	= powf(ld,0.90f);		// 0.90
+							fs	= powf(ls,24.f);
+								}	break;
+						case 2:	{ // looks like Phong
+							fd	= ld;					// 1.0
+							fs	= powf(ls*1.01f,128.f	);
+								}	break;
+						case 3:	{ // looks like Metal
+							float	s0	= std::abs(1-std::abs	(0.05f*std::sin(33.f*ld)+ld-ls));
+							float	s1	= std::abs(1-std::abs	(0.05f*std::cos(33.f*ld*ls)+ld-ls));
+							float	s2	= std::abs(1-std::abs	(ld-ls));
+							fd		=	ld;				// 1.0
+							fs		=	powf	(std::max(std::max(s0,s1),s2), 24.f);
+							fs		*=	powf	(ld,1/7.f);
+								}	break;
+						default:
+							fd	= fs = 0;
+						}
+						s32		_d	=	clampr	(iFloor	(fd*255.5f),	0,255);
+						s32		_s	=	clampr	(iFloor	(fs*255.5f),	0,255);
+						if ((y==(TEX_material_LdotH-1)) && (x==(TEX_material_LdotN-1)))	{ _d = 255; _s=255;	}
+						*p			=	u16		(_s*256 + _d);
+					}
+				}
+			}
+
+			R_CHK(RDevice->CreateTexture3D(&desc, &subData, &t_material_surf));
+			t_material = dxRenderDeviceRender::Instance().Resources->_CreateTexture(r2_material);
+			
+			// Create RHITextureDesc for the texture
+			RHITextureDesc rhiDesc;
+			rhiDesc.Width = desc.Width;
+			rhiDesc.Height = desc.Height;
+			rhiDesc.Depth = desc.Depth;
+			rhiDesc.MipLevels = desc.MipLevels;
+			rhiDesc.Format = (ERHI_FORMAT)desc.Format;
+			rhiDesc.Usage = (ERHI_USAGE)desc.Usage;
+			rhiDesc.BindFlags = (ERHI_BIND_FLAG)desc.BindFlags;
+			rhiDesc.CPUAccessFlags = desc.CPUAccessFlags;
+			rhiDesc.MiscFlags = desc.MiscFlags;
+			
+			// Use GRHI to create the surface
+			IRHISurface* rhiSurface = GRHI->CreateTextureFromMemory(t_material_surf, 0, rhiDesc);
+			t_material->surface_set(rhiSurface);
+		}
+
+		// Build noise table
+		{
+			static const int sampleSize = 4;
+			u32	tempData[TEX_jitter_count][TEX_jitter * TEX_jitter];
+
+			RHITextureDesc desc;
+			desc.Width = TEX_jitter;
+			desc.Height = TEX_jitter;
+			desc.MipLevels = 1;
+			desc.ArraySize = 1;
+			desc.Format = ERHI_FORMAT::R8G8B8A8_SNORM;
+
+			desc.Usage = ERHI_USAGE::USAGE_DEFAULT;
+			desc.BindFlags = ERHI_BIND_FLAG::SHADER_RESOURCE;
+			desc.CPUAccessFlags = 0;
+			desc.MiscFlags = 0;
+
+			RHISubResource subData[TEX_jitter_count];
+
+			for(int it = 0; it < TEX_jitter_count; it++)
+			{
+				subData[it].Data = tempData[it];
+				subData[it].DataSize = desc.Width * sampleSize;
+			}
+
+			for(u32 y = 0; y < TEX_jitter; y++)
+			{
+				for(u32 x = 0; x < TEX_jitter; x++)
+				{
+					DWORD data[TEX_jitter_count];
+					generate_jitter(data, TEX_jitter_count);
+					for(u32 it = 0; it < TEX_jitter_count; it++)
+					{
+						u32* p = (u32*)(LPBYTE(subData[it].Data) + y * subData[it].DataSize + x * 4);
+						*p = data[it];
+					}
+				}
+			}
+
+			for(int it = 0; it < TEX_jitter_count; it++)
+			{
+				xr_sprintf(name, "%s%d", r2_jitter, it);
+				t_noise_surf[it] = GRHI->CreateTexture2D(desc, subData[it]);
+				t_noise[it] = dxRenderDeviceRender::Instance().Resources->_CreateTexture(name);
+				t_noise[it]->surface_set(t_noise_surf[it]);
+			}
+		}
+	}
+
+	// PP
+	s_postprocess.create("postprocess");
+	g_postprocess.create(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX3, RCache.Vertex.Buffer(), RCache.QuadIB);
+
+	// Menu
+	s_menu.create("distort");
+	g_menu.create(FVF::F_TL, RCache.Vertex.Buffer(), RCache.QuadIB);
+
+	u_setrt(Device.TargetWidth, Device.TargetHeight, rt_BackbufferLUT->pRT, nullptr, nullptr, nullptr);
+
+	dwWidth = Device.TargetWidth;
+	dwHeight = Device.TargetHeight;
+
+	CreateFSTriangle();
+}
+
+//Creates fullscreen triangle
+void CRenderTarget::CreateFSTriangle()
+{
+	//LVutner: A couple ideas: nuke vertex color, nuke index buffer, nuke vertex buffer. Thank you.
+	FVF::TL verts[3];
+	constexpr u32 color = color_rgba(0, 0, 0, 255);
+
+	verts[0].set(-1.0, 1.0, 1.0, 1.0, color, 0.0, 0.0);
+	verts[1].set(3.0, 1.0, 1.0, 1.0, color, 2.0, 0.0);
+	verts[2].set(-1.0, -3.0, 1.0, 1.0, color, 0.0, 2.0);
+
+	static constexpr u16 indices[3] = { 0, 1, 2 };
+
+	RHIUtils::CreateVertexBuffer(&FSTriangleVB, verts, sizeof(verts), true);
+	RHIUtils::CreateIndexBuffer(&FSTriangleIB, indices, sizeof(indices), true);
+
+	FSTriangleGeom.create(FVF::F_TL, FSTriangleVB, FSTriangleIB);
+}
+
+CRenderTarget::~CRenderTarget	()
+{
+	if (EditorWindowDepth != nullptr)
+	{
+		GRHI->SetDepthStencilView(nullptr);
+		GRHI->DevicePtr->RenderDSV = EditorWindowDepth;
+		EditorWindowDepth = nullptr;
+	}
+
+	_RELEASE					(t_ss_async);
+
+	rt_smap_depth_sun->surface_set(nullptr);
+	_RELEASE(rt_smap_depth_sun_tex);
+
+	for(auto i = 0; i < 3; ++i)
+	{
+		_RELEASE(rt_smap_depth_sun_dsv[i]);
+	}
+	
+	// Textures
+	t_material->surface_set		(nullptr);
+
+#ifdef DEBUG
+	_SHOW_REF					("t_material_surf",t_material_surf);
+#endif // DEBUG
+	_RELEASE					(t_material_surf);
+
+#ifdef DEBUG
+	IRHISurface*	pSurf = 0;
+
+	pSurf = t_envmap_0->surface_get();
+	if (pSurf) pSurf->Release();
+	_SHOW_REF("t_envmap_0 - #small", pSurf);
+
+	pSurf = t_envmap_1->surface_get();
+	if (pSurf) pSurf->Release();
+	_SHOW_REF("t_envmap_1 - #small", pSurf);
+	//_SHOW_REF("t_envmap_0 - #small",t_envmap_0->pSurface);
+	//_SHOW_REF("t_envmap_1 - #small",t_envmap_1->pSurface);
+#endif // DEBUG
+	t_envmap_0->surface_set		(nullptr);
+	t_envmap_1->surface_set		(nullptr);
+	t_envmap_0.destroy			();
+	t_envmap_1.destroy			();
+
+	//	TODO: DX10: Check if we need old style SMAPs
+//	_RELEASE					(rt_smap_ZB);
+
+	// Jitter
+	for (int it = 0; it < TEX_jitter_count; it++)
+	{
+		t_noise[it]->surface_set(nullptr);
+		_RELEASE(t_noise_surf[it]);
+	}
+
+	accum_spot_geom_destroy();
+	accum_omnip_geom_destroy();
+	accum_point_geom_destroy();
+	accum_volumetric_geom_destroy();
+
+	// Blenders
+	xr_delete(b_combine);
+	xr_delete(b_luminance);
+	xr_delete(b_bloom);
+	xr_delete(b_accum_reflected);
+	xr_delete(b_accum_spot);
+	xr_delete(b_accum_point);
+	xr_delete(b_accum_direct);
+	xr_delete(b_ssao);
+	xr_delete(b_fxaa);
+	xr_delete(b_smaa);
+	xr_delete(b_gamma);
+	xr_delete(b_spp);
+	xr_delete(b_bodycam);
+	xr_delete(b_gasmask);
+	xr_delete(b_accum_mask);
+	xr_delete(b_occq);
+	xr_delete(b_cas);
+	xr_delete(b_gtao);
+	xr_delete(b_taa);
+	xr_delete(b_nvg);
+	xr_delete(b_bloom_downsample);
+	xr_delete(b_bloom_upsample);
+	xr_delete(b_new_adaptation);
+	xr_delete(b_sslr);
+
+	g_Fsr3Wrapper.Destroy();
+#if 0
+	g_XESSWrapper.Destroy();
+#endif
+
+	CImGuiManager::Instance().Unsubscribe("GraphicDebug");
+
+	if (g_debug_blend_state != nullptr) 
+	{
+		g_debug_blend_state->Release();
+		g_debug_blend_state = nullptr;
+	}
+
+	FSTriangleVB->Release();
+	FSTriangleIB->Release();
+}
+
+void CRenderTarget::reset_light_marker( bool bResetStencil)
+{
+	dwLightMarkerID = 5;
+	if (bResetStencil)
+	{
+		u32 Offset;
+
+		float _w = RCache.get_width();
+		float _h = RCache.get_height();
+
+		constexpr u32 C = color_rgba(255, 255, 255, 255);
+		float eps = 0;
+
+		float _dw = 0.5f;
+		float _dh = 0.5f;
+
+		FVF::TL* pv = (FVF::TL*)RCache.Vertex.Lock(4, g_combine->vb_stride, Offset);
+		pv->set(-_dw, _h - _dh, eps, 1.f, C, 0, 0);	pv++;
+		pv->set(-_dw, -_dh, eps, 1.f, C, 0, 0);	pv++;
+		pv->set(_w - _dw, _h - _dh, eps, 1.f, C, 0, 0);	pv++;
+		pv->set(_w - _dw, -_dh, eps, 1.f, C, 0, 0);	pv++;
+
+		RCache.Vertex.Unlock(4, g_combine->vb_stride);
+		RCache.set_Element(s_occq->E[2]);
+		RCache.set_Geometry(g_combine);
+
+		RCache.Render(ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_LIST, Offset, 0, 4, 0, 2);
+	}
+}
+
+void CRenderTarget::increment_light_marker()
+{
+	dwLightMarkerID += 2;
+
+	const u32 iMaxMarkerValue = 255;
+
+	if(dwLightMarkerID > iMaxMarkerValue)
+		reset_light_marker(true);
+}
+
+bool CRenderTarget::need_to_render_sunshafts()
+{
+	if(ps_r_sun_shafts) {
+		CEnvDescriptor& E = *g_pGamePersistent->Environment().CurrentEnv;
+		Fcolor sun_color = ((light*)RImplementation.Lights.sun_adapted._get())->color;
+		float fValue = E.m_fSunShaftsIntensity * u_diffuse2s(sun_color.r, sun_color.g, sun_color.b);
+
+		if(fValue > EPS) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void CRenderTarget::copy_position()
+{
+	GPU_EVENT(ZBUFFER_COPY);
+
+	GRHI->SetDepthStencilView(nullptr);
+	GRHI->CopySurface(rt_Position->pSurface, RDepth->GetSurface());
+}

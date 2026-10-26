@@ -1,0 +1,246 @@
+#pragma once
+
+#include "Weapon.h"
+#include "../xrScripts/script_export_space.h"
+#include "../xrEngine/xr_collide_form.h"
+
+class CWeaponKnife final : public CWeapon
+{
+	using inherited = CWeapon;
+
+protected:
+
+	virtual void		switch2_Idle				();
+	virtual void		switch2_Hiding				();
+	virtual void		switch2_Hidden				();
+	virtual void		switch2_Showing				();
+			void		switch2_Attacking			(u8 state);
+
+	virtual void		OnAnimationEnd				(u8 state);
+	virtual void		OnMotionMark				(u8 state, const motion_marks&);
+			void		OnKnifeStrike				();
+	virtual void		OnStateSwitch				(u8 S);
+
+	virtual void		UpdateCL					();
+
+	virtual void		KnifeStrike					(const Fvector& pos, const Fvector& dir);
+
+	float				fWallmarkSize;
+	u16					knife_material_idx;
+
+protected:
+    bool				attackStarted;
+    bool				attackMotionMarksAvailable;
+    bool				oldStrikeMethod;
+
+	ALife::EHitType		m_eHitType;
+
+	ALife::EHitType		m_eHitType_1;
+	Fvector4			fvHitPower_1;
+	Fvector4			fvHitPowerCritical_1;
+	float				fHitImpulse_1;
+
+	ALife::EHitType		m_eHitType_2;
+	Fvector4			fvHitPower_2;
+	Fvector4			fvHitPowerCritical_2;
+	float				fHitImpulse_2;
+
+	float				fCurrentHit;
+
+	float				fHitImpulse_cur;
+
+	u32					dwUpdateSounds_Frame;
+
+	bool				UseAlt = false;
+
+protected:
+	virtual void		LoadFireParams					(const char* section);
+
+	virtual void		switch2_Suicide() override;
+	virtual void		switch2_SuicideStop() override;
+public:
+	CWeaponKnife(); 
+	virtual ~CWeaponKnife() = default; 
+
+	virtual void		Load							(const char* section) override;
+	virtual void		LoadSounds						(const char* section) override;
+
+	virtual bool		IsZoomEnabled					()	const	{return false;}
+
+			void		Fire2Start						();
+	virtual void		FireStart						();
+
+
+	virtual bool		Action							(u16 cmd, u32 flags);
+
+	virtual bool		GetBriefInfo					(II_BriefInfo& info);
+	IC		Fvector3	GetHit1SplashDir				()	const	{ return m_Hit1SplashDir; }
+	IC		Fvector3	GetHit2SplashDir				()	const	{ return m_Hit2SplashDir; }
+	IC		void		SetHit1SplashDir				(Fvector3 value)	{ m_Hit1SplashDir = value; }
+	IC		void		SetHit2SplashDir				(Fvector3 value)	{ m_Hit2SplashDir = value; }
+
+	IC		float		GetHit1Dist						()	const	{ return m_Hit1Distance; }
+	IC		float		GetHit2Dist						()	const	{ return m_Hit2Distance; }
+	IC		void		SetHit1Dist						(float value)		{ m_Hit1Distance = value; }
+	IC		void		SetHit2Dist						(float value)		{ m_Hit2Distance = value; }
+
+	IC		float		GetHit1SplashRadius				()	const	{ return m_Hit1SplashRadius; }
+	IC		float		GetHit2SplashRadius				()	const	{ return m_Hit2SplashRadius; }
+	IC		void		SetHit1SplashRadius				(float value)		{ m_Hit1SplashRadius = value; }
+	IC		void		SetHit2SplashRadius				(float value)		{ m_Hit2SplashRadius = value; }
+
+	IC		u32			GetSplash1HitsCount			()	const	{ return m_Splash1HitsCount; }
+	IC		u32			GetSplash2HitsCount			()	const	{ return m_Splash2HitsCount; }
+	IC		void		SetSplash1HitsCount			(u32 value)			{ m_Splash1HitsCount = value; }
+	IC		void		SetSplash2HitsCount			(u32 value)			{ m_Splash2HitsCount = value; }
+
+	IC		u32			GetSplash1PerVictimsHCount	()	const	{ return m_Splash1PerVictimsHCount; }
+	IC		void		SetSplash1PerVictimsHCount	(u32 value)			{ m_Splash1PerVictimsHCount = value; }
+
+	IC		float		GetNextHitDivideFactor			()	const	{ return m_NextHitDivideFactor; }
+	IC		void		SetNextHitDivideFactor			(float value)		{ m_NextHitDivideFactor = value; }
+
+	bool				m_bShowKnifeStats;
+
+	void				FastKick();
+
+	virtual bool WpnCanShoot() const override { return false; }
+
+	virtual CWeaponKnife* cast_weapon_knife() { return this; }
+
+	virtual float getHitImpulse() const { return fHitImpulse_1; }
+	virtual void setHitImpulse(float value);
+	virtual const Fvector4& getHitPower() const { return fvHitPower_1; }
+	virtual void setHitPower(const Fvector4& vec);
+	virtual const Fvector4& getHitPowerCritical() const { return fvHitPowerCritical_1; }
+	virtual void setHitPowerCritical(const Fvector4& vec);
+
+	float getHitImpulse_2() const { return fHitImpulse_2; }
+	void setHitImpulse_2(float value);
+	const Fvector4& getHitPower_2() const { return fvHitPower_2; }
+	void setHitPower_2(const Fvector4& vec);
+	const Fvector4& getHitPowerCritical_2() const { return fvHitPowerCritical_2; }
+	void setHitPowerCritical_2(const Fvector4& vec);
+
+private:
+	typedef buffer_vector<Fvector>						shot_targets_t;
+#ifdef DEBUG
+	struct dbg_draw_data
+	{
+		typedef xr_vector<std::pair<Fvector, float> >	spheres_t;
+		typedef xr_vector<Fobb>							obbes_t;
+		typedef xr_vector<std::pair<Fvector, Fvector> >	lines_t;
+		typedef xr_vector<Fvector>						targets_t;
+		
+		spheres_t					m_spheres;
+		lines_t						m_pick_vectors;
+		targets_t					m_targets_vectors;
+		obbes_t						m_target_boxes;
+	};
+	dbg_draw_data	m_dbg_data;
+#endif
+	float			m_Hit1Distance;
+	float			m_Hit2Distance;
+
+	Fvector3		m_Hit1SplashDir;
+	Fvector3		m_Hit2SplashDir;
+	
+	float			m_Hit1SplashRadius;
+	float			m_Hit2SplashRadius;
+
+	shared_str		m_SplashHitBone;
+	
+	u32				m_Splash1HitsCount;
+	u32				m_Splash1PerVictimsHCount;
+	u32				m_Splash2HitsCount;
+	float			m_NextHitDivideFactor;
+
+	float			m_hit_dist;
+	Fvector3		m_splash_dir;
+	float			m_splash_radius;
+	u32				m_hits_count;
+	u32				m_perv_hits_count;
+
+
+	void			MakeShot				(Fvector const & pos, Fvector const & dir, float const k_hit = 1.0f);
+	void			GetVictimPos			(CEntityAlive* victim, Fvector & pos_dest);
+	u32				SelectHitsToShot		(shot_targets_t & dst_dirs, Fvector const & f_pos);
+	bool			SelectBestHitVictim		(Fvector const & f_pos, Fmatrix & parent_xform_dest, Fvector & fendpos_dest, Fsphere & query_sphere);
+	CObject*		TryPick					(Fvector const & start_pos,
+											 Fvector const & dir,
+											 float const dist);
+
+	static bool		RayQueryCallback		(collide::rq_result& result, LPVOID this_ptr);
+	collide::rq_results				m_ray_query_results;
+	ALife::_OBJECT_ID								m_except_id;
+	CObject*						m_last_picked_obj;
+
+	typedef xr_vector<ISpatialShared>			spartial_base_t;
+	typedef buffer_vector<CEntityAlive*>		victims_list_t;
+	struct	victim_bone_data
+	{
+		CCF_Skeleton::SElement const *	m_bone_element;
+		ALife::_OBJECT_ID								m_victim_id;
+		u16								m_shots_count;
+	};//struct	victim_bone_data
+	typedef associative_vector<ALife::_OBJECT_ID, u16>						victims_hits_count_t;
+	typedef buffer_vector<std::pair<victim_bone_data, float> >	victims_shapes_list_t;
+
+	spartial_base_t					m_spartial_query_res;
+	victims_hits_count_t			m_victims_hits_count;
+
+	class victim_filter
+	{
+	public:
+		victim_filter	(u16 except_id,
+						 Fvector const & pos,
+						 float query_distance);
+		victim_filter	(victim_filter const & copy);
+		bool operator()	(spartial_base_t::value_type const & left) const;
+	private:
+		victim_filter & operator=(victim_filter const & copy) = delete;
+
+		u16				m_except_id;
+		CWeaponKnife*	m_owner;
+		Fvector			m_start_pos;
+		float			m_query_distance;
+	};//class victim_filter
+	class best_victim_selector
+	{
+	public:
+		best_victim_selector	(ALife::_OBJECT_ID except_id,
+								 Fvector const & pos,
+								 float query_distance,
+								 spartial_base_t::value_type & dest_result);
+
+		best_victim_selector(best_victim_selector const & copy);
+		void operator()(spartial_base_t::value_type const & left);
+	private:
+		best_victim_selector & operator=(best_victim_selector const & copy) = delete;
+		
+		Fvector			m_start_pos;
+		float			m_min_dist;
+		float			m_query_distance;
+		ALife::_OBJECT_ID				m_except_id;
+		spartial_base_t::value_type & m_dest_result;
+	};//struct best_victim_selector
+
+	
+	static bool shapes_compare_predicate(victims_shapes_list_t::value_type const & left,
+										 victims_shapes_list_t::value_type const & right)
+	{
+		return left.second < right.second;
+	}
+
+	static void create_victims_list		(spartial_base_t spartial_result,
+										 victims_list_t & victims_dest);
+	static u32	get_entity_bones_count	(CEntityAlive const * entity);
+	void		fill_shapes_list		(CEntityAlive const * entity,
+										 Fvector const & camera_endpos,
+										 victims_shapes_list_t & dest_shapes);
+	void		make_hit_sort_vectors	(Fvector & basis_hit_specific, float & max_dist);
+	void		fill_shots_list			(victims_shapes_list_t & victims_shapres,
+										 Fsphere const & query,
+										 shot_targets_t & dest_shots);
+	DECLARE_SCRIPT_REGISTER_FUNCTION
+};

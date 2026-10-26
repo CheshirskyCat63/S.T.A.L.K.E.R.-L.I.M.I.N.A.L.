@@ -1,0 +1,201 @@
+#include "stdafx.h"
+#include "Editor/Tools/Terrain/ESceneTerrainTools.h"
+
+int EScene::FrustumPick( const CFrustum& frustum, ObjClassID classfilter, ObjectList& ol )
+{
+	int count = 0;
+
+	if (classfilter==OBJCLASS_DUMMY){
+		SceneToolsMapPairIt _I = m_SceneTools.begin();
+		SceneToolsMapPairIt _E = m_SceneTools.end();
+		for (; _I!=_E; _I++){
+			ESceneCustomOTool* mt = smart_cast<ESceneCustomOTool*>(_I->second);
+			if (mt) 		count+=mt->FrustumPick(ol,frustum);
+		}
+	}else{
+		ESceneCustomOTool* mt = GetOTool(classfilter);
+		if (mt) 			count+=mt->FrustumPick(ol,frustum);
+	}
+
+	return count;
+}
+
+int EScene::SpherePick( const Fvector& center, float radius, ObjClassID classfilter, ObjectList& ol )
+{
+	int count = 0;
+
+	if (classfilter==OBJCLASS_DUMMY){
+		SceneToolsMapPairIt _I = m_SceneTools.begin();
+		SceneToolsMapPairIt _E = m_SceneTools.end();
+		for (; _I!=_E; _I++){
+			ESceneCustomOTool* mt = smart_cast<ESceneCustomOTool*>(_I->second);
+			if (mt) 		count+=mt->SpherePick(ol,center, radius);
+		}
+	}else{
+		ESceneCustomOTool* mt = GetOTool(classfilter);
+		if (mt) 			count+=mt->SpherePick(ol,center, radius);
+	}
+
+	return count;
+}
+extern ECORE_API CDB::COLLIDER XRC;
+int EScene::RayQuery(SPickQuery& PQ, const Fvector& start, const Fvector& dir, float dist, u32 flags, ObjectList* snap_list)
+{
+	VERIFY			(snap_list);
+	PQ.prepare_rq	(start,dir,dist,flags);
+	XRC.ray_options	(flags);
+	for(ObjectIt _F=snap_list->begin();_F!=snap_list->end();_F++)
+		((CSceneObject*)(*_F))->RayQuery(PQ);
+	return PQ.r_count();
+}
+
+int EScene::BoxQuery(SPickQuery& PQ, const Fbox& bb, u32 flags, ObjectList* snap_list)
+{
+	VERIFY(snap_list);
+	PQ.prepare_bq(bb, flags);
+	XRC.box_options(flags);
+	for (ObjectIt _F = snap_list->begin(); _F != snap_list->end(); _F++)
+	{
+		((*_F))->BoxQuery(PQ);
+	}
+
+	return PQ.r_count();
+}
+
+int EScene::RayQuery(SPickQuery& PQ, const Fvector& start, const Fvector& dir, float dist, u32 flags, CDB::MODEL* model)
+{
+	PQ.prepare_rq	(start,dir,dist,flags);
+	XRC.ray_options	(flags);
+	XRC.ray_query	(model,start,dir,dist);
+	for (int r=0; r< XRC.r_count(); r++)
+		PQ.append	(XRC.r_begin()+r,0,0);
+	return PQ.r_count();
+}
+
+int EScene::BoxQuery(SPickQuery& PQ, const Fbox& bb, u32 flags, CDB::MODEL* model)
+{
+	PQ.prepare_bq	(bb,flags);
+	XRC.box_options	(flags);
+	Fvector c,d;
+	bb.getcenter	(c);
+	bb.getradius	(d);
+	XRC.box_query	(model,c,d);
+	for (int r=0; r< XRC.r_count(); r++)
+		PQ.append	(XRC.r_begin()+r,0,0);
+	return PQ.r_count();
+}
+
+bool EScene::GetPlayInEditorRayPickCall()
+{
+	return !IsPlayInEditor() || IsPIERayPick;
+}
+
+void EScene::SetPlayInEditorRayPickCall(bool Value)
+{
+	IsPIERayPick = Value;
+}
+
+CCustomObject *EScene::RayPickObject(float nearest_dist, const Fvector& start, const Fvector& direction, ObjClassID classfilter, SRayPickInfo* pinf, ObjectList* from_list)
+{
+	if(!valid()) return 0;
+
+	xrCriticalSectionGuard guard(PickUpLock);
+
+	CCustomObject *nearest_object = 0;
+	if (from_list){
+		for(ObjectIt _F=from_list->begin();_F!=from_list->end();_F++)
+			if((*_F)->Visible()&&(*_F)->RayPick(nearest_dist,start,direction,pinf))
+				nearest_object = (*_F);
+	}else{
+		if (classfilter==OBJCLASS_DUMMY){
+			CCustomObject *obj = 0;
+			SceneToolsMapPairIt _I = m_SceneTools.begin();
+			SceneToolsMapPairIt _E = m_SceneTools.end();
+			for (; _I!=_E; _I++){
+				ESceneCustomOTool* mt = smart_cast<ESceneCustomOTool*>(_I->second);
+				if (mt&&mt->RayPick(obj,nearest_dist,start,direction,pinf)) nearest_object = obj;
+			}
+		}else{
+			ESceneCustomOTool* mt = GetOTool(classfilter);
+			if (mt) mt->RayPick(nearest_object,nearest_dist,start,direction,pinf);
+		}
+	}
+	return nearest_object;
+}
+
+int EScene::GetQueryObjects(ObjectList& lst, ObjClassID classfilter, int iSel, int iVis, int iLock)
+{
+	if (classfilter==OBJCLASS_DUMMY){
+		SceneToolsMapPairIt _I = m_SceneTools.begin();
+		SceneToolsMapPairIt _E = m_SceneTools.end();
+		for (; _I!=_E; ++_I)
+		{
+			ESceneCustomOTool* mt = smart_cast<ESceneCustomOTool*>(_I->second);
+			if (mt) mt->GetQueryObjects(lst, iSel, iVis, iLock);
+		}
+	}else{
+		ESceneCustomOTool* mt = GetOTool(classfilter);
+		if (mt) mt->GetQueryObjects(lst, iSel, iVis, iLock);
+	}
+	return lst.size();
+}
+
+int EScene::RaySelect(int flag, ObjClassID classfilter)
+{
+	if (!valid())
+	{
+		return 0;
+	}
+
+	float Dist = EContext.UI->ZFar();
+	ESceneToolBase* Mt = 0;
+	if (classfilter == OBJCLASS_DUMMY)
+	{
+		SceneToolsMapPairIt _I = m_SceneTools.begin();
+		SceneToolsMapPairIt _E = m_SceneTools.end();
+		for (; _I != _E; _I++)
+		{
+			float Range = EContext.UI->ZFar();
+			_I->second->RaySelect(flag, Range, EContext.UI->m_CurrentRStart, EContext.UI->m_CurrentRDir, true);
+			if (Range < Dist)
+			{
+				Dist = Range;
+				Mt = _I->second;
+			}
+		}
+	}
+	else
+	{
+		Mt = GetTool(classfilter);
+	}
+	int Count = 0;
+	Dist = EContext.UI->ZFar();
+	if (Mt)
+	{
+		Count = Mt->RaySelect(flag, Dist, EContext.UI->m_CurrentRStart, EContext.UI->m_CurrentRDir, false);
+	}
+	return Count;
+}
+
+int EScene::BoxPickObjects(const Fbox& box, SBoxPickInfoVec& pinf, ObjectList* lst)
+{
+	xrCriticalSectionGuard Lock(PickUpLock);
+
+	if (lst)
+	{
+		for (ObjectIt _F = lst->begin(); _F != lst->end(); _F++)
+		{
+			if (CSceneObject* _S = smart_cast<CSceneObject*>(*_F))
+			{
+				_S->BoxPick(box, pinf);
+			}
+			else if (CTerrain* _S = smart_cast<CTerrain*>(*_F))
+			{
+				_S->BoxPick(box, pinf);
+			}
+		}
+	}
+
+	return pinf.size();
+}
+ 

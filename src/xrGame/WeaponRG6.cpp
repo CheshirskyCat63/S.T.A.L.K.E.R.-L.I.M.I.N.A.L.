@@ -1,0 +1,303 @@
+#include "StdAfx.h"
+#include "WeaponRG6.h"
+#include "Entity.h"
+#include "ExplosiveRocket.h"
+#include "Level.h"
+#include "../xrPhysics/MathUtils.h"
+#include "Actor.h"
+#include "UIGameCustom.h"
+#include "Inventory.h"
+#include "InventoryOwner.h"
+
+#ifdef DEBUG
+#	include "PHDebug.h"
+#endif
+
+bool CWeaponRG6::net_Spawn(CSE_Abstract* DC)
+{
+	bool l_res = inheritedSG::net_Spawn(DC);
+	if (!l_res) return l_res;
+
+	if (AmmoElapsed.MagazineElapsed && !getCurrentRocket())
+	{
+		shared_str grenade_name = m_ammoTypes[0];
+		shared_str fake_grenade_name = pSettings->r_string(grenade_name, "fake_grenade_name");
+
+		if (fake_grenade_name.size())
+		{
+			int k = AmmoElapsed.MagazineElapsed;
+			while (k)
+			{
+				k--;
+				inheritedRL::SpawnRocket(*fake_grenade_name, this);
+			}
+		}
+	}
+
+	return l_res;
+}
+
+void CWeaponRG6::Load(const char* section)
+{
+	inheritedRL::Load(section);
+	inheritedSG::Load(section);
+
+	m_bAlternateReloadScheme = READ_IF_EXISTS(pSettings, r_bool, section, "alternate_reload_scheme", false);
+}
+
+void CWeaponRG6::FireTrace(const Fvector& P, const Fvector& D)
+{
+	inheritedSG::FireTrace(P, D);
+	
+	Fvector p1, d; 
+	p1.set(P); 
+	d.set(D);
+
+	if (CEntity* entity = H_Parent() ? H_Parent()->cast_entity() : nullptr)
+		entity->g_fireParams (this, p1,d);
+	
+	Fmatrix launch_matrix;
+	launch_matrix.identity();
+	launch_matrix.k.set(d);
+	Fvector::generate_orthonormal_basis(launch_matrix.k,
+										launch_matrix.j, launch_matrix.i);
+	launch_matrix.c.set(p1);
+
+	if (IsGameTypeSingle() && IsZoomed() && H_Parent() && H_Parent()->cast_actor())
+	{
+		collide::rq_result RQ;
+		bool HasPick = Level().ObjectSpace.RayPick(p1, d, 300.0f, collide::rqtStatic, RQ, H_Parent());
+
+		if (HasPick)
+		{
+			Fvector Transference;		
+			Transference.mul(d, RQ.range);
+			Fvector res[2];
+			u8 canfire0 = TransferenceAndThrowVelToThrowDir(Transference, CRocketLauncher::m_fLaunchSpeed, EffectiveGravity(), res);
+			if (canfire0 != 0)
+			{
+				d = res[0];
+			};
+		}
+	};
+
+	if (H_Parent() && H_Parent()->cast_actor() && H_Parent()->cast_actor()->ControlledTimeRemains > 0)
+	{
+		d.set(0.0f, -2.0f, 0.0f);
+	}
+
+	d.normalize();
+	d.mul(m_fLaunchSpeed);
+	VERIFY2(_valid(launch_matrix),"CWeaponRG6::FireStart. Invalid launch_matrix");
+	CRocketLauncher::LaunchRocket(launch_matrix, d, zero_vel);
+
+	if (CExplosiveRocket* pGrenade = getCurrentRocket()->cast_explosive_rocket())
+	{
+		VERIFY(pGrenade);
+		pGrenade->SetInitiator(H_Parent() ? H_Parent()->ID() : ID());
+	}
+
+	if (OnServer())
+	{
+		NET_Packet P;
+		u_EventGen(P,GE_LAUNCH_ROCKET,ID());
+		P << getCurrentRocket()->ID();
+		u_EventSend(P);
+	}
+	
+	//if (IsGameTypeSingle())
+	//{
+	//	dropCurrentRocket();
+	//}
+
+	if (infinite_fire())
+	{
+		shared_str fake_grenade_name = pSettings->r_string(m_ammoTypes[AmmoType.MagazineType].c_str(), "fake_grenade_name");
+		inheritedRL::SpawnRocket(*fake_grenade_name, this);
+	}
+}
+
+void CWeaponRG6::ReloadMagazine()
+{
+	m_BriefInfo_CalcFrame = 0;
+
+	if (!m_bLockType)
+	{
+		m_pCurrentAmmo = nullptr;
+	}
+
+	if (!m_pInventory) return;
+
+	if (m_set_next_ammoType_on_reload != undefined_ammo_type)
+	{
+		AmmoType.MagazineType = m_set_next_ammoType_on_reload;
+		m_set_next_ammoType_on_reload = undefined_ammo_type;
+	}
+
+	if (!unlimited_ammo())
+	{
+		if (m_ammoTypes.size() <= AmmoType.MagazineType)
+			return;
+
+		const char* tmp_sect_name = m_ammoTypes[AmmoType.MagazineType].c_str();
+
+		if (!tmp_sect_name)
+			return;
+
+		//попытаться найти в инвентаре патроны текущего типа
+		PIItem get_any = m_pInventory->GetAny(tmp_sect_name);
+		m_pCurrentAmmo = get_any != nullptr ? get_any->cast_weapon_ammo() : nullptr;
+
+		if (!m_pCurrentAmmo && !m_bLockType)
+		{
+			for (u8 i = 0; i < u8(m_ammoTypes.size()); ++i)
+			{
+				//проверить патроны всех подходящих типов
+				get_any = m_pInventory->GetAny(m_ammoTypes[i].c_str());
+				m_pCurrentAmmo = get_any != nullptr ? get_any->cast_weapon_ammo() : nullptr;
+
+				if (m_pCurrentAmmo)
+				{
+					AmmoType.MagazineType = i;
+					break;
+				}
+			}
+		}
+	}
+
+	//нет патронов для перезарядки
+	if (!m_pCurrentAmmo && !unlimited_ammo()) return;
+
+	//разрядить магазин, если загружаем патронами другого типа
+	if (!m_bLockType && !m_magazine.empty() &&
+		(!m_pCurrentAmmo || xr_strcmp(m_pCurrentAmmo->cNameSect(),
+			*m_magazine.back().m_ammoSect)))
+		UnloadMagazine();
+
+	VERIFY((u32)AmmoElapsed.MagazineElapsed == m_magazine.size());
+
+	if (m_DefaultCartridge.m_LocalAmmoType != AmmoType.MagazineType)
+		m_DefaultCartridge.Load(m_ammoTypes[AmmoType.MagazineType].c_str(), AmmoType.MagazineType);
+	CCartridge l_cartridge = m_DefaultCartridge;
+
+	shared_str fake_grenade_name = pSettings->r_string(*m_ammoTypes[AmmoType.MagazineType], "fake_grenade_name");
+
+	while (AmmoElapsed.MagazineElapsed < iMagazineSize)
+	{
+		if (!unlimited_ammo())
+		{
+			if (!m_pCurrentAmmo->Get(l_cartridge)) break;
+		}
+		++AmmoElapsed.MagazineElapsed;
+		l_cartridge.m_LocalAmmoType = AmmoType.MagazineType;
+		m_magazine.push_back(l_cartridge);
+		inheritedRL::SpawnRocket(*fake_grenade_name, this);
+	}
+
+	VERIFY((u32)AmmoElapsed.MagazineElapsed == m_magazine.size());
+
+	//выкинуть коробку патронов, если она пустая
+	if (m_pCurrentAmmo && !m_pCurrentAmmo->m_boxCurr && OnServer())
+		m_pCurrentAmmo->SetDropManual(true);
+
+	if (iMagazineSize > AmmoElapsed.MagazineElapsed)
+	{
+		m_bLockType = true;
+		ReloadMagazine();
+		m_bLockType = false;
+	}
+
+	VERIFY((u32)AmmoElapsed.MagazineElapsed == m_magazine.size());
+}
+
+void CWeaponRG6::UnloadMagazine(bool spawn_ammo)
+{
+	inheritedSG::UnloadMagazine(spawn_ammo);
+
+	while (getRocketCount())
+	{
+		dropCurrentRocket();
+	}
+}
+
+u8 CWeaponRG6::AddCartridge		(u8 cnt)
+{
+	u8 t = inheritedSG::AddCartridge(cnt);
+	u8 k = cnt-t;
+	shared_str fake_grenade_name = pSettings->r_string(m_ammoTypes[AmmoType.MagazineType].c_str(), "fake_grenade_name");
+	while(k){
+		--k;
+		inheritedRL::SpawnRocket(*fake_grenade_name, this);
+	}
+	return k;
+}
+
+void CWeaponRG6::OnEvent(NET_Packet& P, u16 type) 
+{
+	ALife::_OBJECT_ID id;
+	switch (type)
+	{
+		case GE_OWNERSHIP_TAKE:
+		{
+			P >> id;
+			CObject* O = Level().Objects.net_Find(id);
+			if (O->cast_custom_rocket())
+			{
+				inheritedRL::AttachRocket(id, this);
+			}
+			else
+			{
+				O->H_SetParent(this);
+				append_child(id, O->cast_game_object());
+				O->processing_deactivate();
+			}
+		}
+		break;
+		case GE_OWNERSHIP_REJECT:
+		case GE_LAUNCH_ROCKET:
+		{
+			P >> id;
+			CObject* O = Level().Objects.net_Find(id);
+			if (O->cast_custom_rocket())
+			{
+				inheritedRL::DetachRocket(id, !!(type == GE_LAUNCH_ROCKET));
+			}
+			else
+			{
+				bool just_before_destroy = !P.r_eof() && P.r_u8();
+
+				O->SetTmpPreDestroy(just_before_destroy);
+				erase_child(id);
+				O->processing_activate();
+				O->H_SetParent(0, true);
+			}
+		}
+		break;
+		default:
+		{
+			inheritedSG::OnEvent(P, type);
+		}
+		break;
+	}
+}
+
+static u32 iDoReloadElapsed = 0;
+void CWeaponRG6::PlayAnimOpenWeapon()
+{
+	iDoReloadElapsed = AmmoElapsed.MagazineElapsed;
+	inheritedSG::PlayAnimOpenWeapon();
+}
+
+void CWeaponRG6::PlayAnimAddOneCartridgeWeapon()
+{
+	if (m_bAlternateReloadScheme)
+	{
+		shared_str anm;
+		anm.printf("anm_add_cartridge_%d_%d", iDoReloadElapsed, AmmoElapsed.MagazineElapsed + 1);
+		PlayHUDMotion(anm, EHudMixType::eNoMix, GetState());
+	}
+	else
+	{
+		inheritedSG::PlayAnimAddOneCartridgeWeapon();
+	}
+}

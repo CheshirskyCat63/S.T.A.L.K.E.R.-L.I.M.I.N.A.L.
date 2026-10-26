@@ -1,0 +1,869 @@
+#pragma once
+#include "firedeps.h"
+
+#include "../Include/xrRender/Kinematics.h"
+#include "../Include/xrRender/KinematicsAnimated.h"
+#include "actor_defs.h"
+#include "../xrEngine/ObjectAnimator.h"
+#include "../../xrUI/ui_base.h"
+
+class player_hud;
+struct HumanoidPresentation;
+class CWatchDevice;
+class CHudItem;
+class CMotionDef;
+class CHudAnimatorBase;
+class CObjectAnimator;
+
+enum EHudMixType : u8
+{
+	eNoMix = 0,
+	eMixHands,
+	eMixAll
+};
+enum EHudOffsetAxis : u8
+{
+	eAxisPos,
+	eAxisRot,
+	eAxisMax
+};
+enum EHudOffsetType : u8
+{
+	eDefault,
+	eAim,
+	eAimGL,
+	eAimAlt,
+	eSafemode,
+	eCollision,
+	eHudOffsetsMax
+};
+
+enum EMovementLayers : u8
+{
+	eWalk = 0,
+	eWalkSlow,
+	eCrouch,
+	eCrouchSlow,
+	eSprint,
+	eIdle,
+	eIdleAim,
+	eAimWalk,
+	eStrafeLeft,
+	eStrafeRight,
+	eLayersCount
+};
+
+struct motion_descr final
+{
+	MotionID		mid;
+	shared_str		name;
+};
+
+struct player_hud_motion final
+{
+	shared_str				m_alias_name;
+	shared_str				m_base_name;
+	shared_str				m_additional_name;
+	bool					ExplicitItemMotion = false;
+	xr_vector<shared_str>	m_bone_parts;
+	float					m_anim_speed;
+	xr_vector<motion_descr>	m_animations;
+};
+
+struct attachable_hud_item_motion final
+{
+	shared_str				m_alias_name;
+	shared_str				m_name;
+	xr_vector<shared_str>	m_bone_parts;
+	float					m_anim_speed;
+	xr_vector<motion_descr>	m_animations;
+};
+
+struct player_hud_motion_container final
+{
+	xr_vector<player_hud_motion> m_anims;
+	xr_vector<attachable_hud_item_motion> m_item_anims;
+	xr_hash_map<shared_str, bool> m_names;
+	xr_vector<shared_str> m_banned_bone_parts = {};
+	player_hud_motion* find_motion(const shared_str& name);
+	attachable_hud_item_motion* find_item_motion(const shared_str& name);
+	bool has_motion(const shared_str& name);
+	void load(IKinematicsAnimated* model, const shared_str& sect, IKinematicsAnimated* item_model = nullptr);
+	void load_default_motions(IKinematicsAnimated* model, const CInifile::Item& data, const shared_str& sect);
+	void load_bonepart_motions(IKinematicsAnimated* model, const CInifile::Item& data, const shared_str& sect);
+};
+
+struct weapon_inertion final
+{
+	struct base_params
+	{
+		Fvector position;
+		Fvector rotation;
+		void Load(const shared_str& section, const shared_str& str, bool is_16x9);
+	};
+
+	base_params move_suicide_offset;
+
+	base_params move_to_crouch_offset;
+	base_params move_from_crouch_offset;
+	base_params move_to_slow_crouch_offset;
+	base_params move_from_slow_crouch_offset;
+
+	base_params move_to_rlookout_offset;
+	base_params move_from_rlookout_offset;
+	base_params move_to_llookout_offset;
+	base_params move_from_llookout_offset;
+
+	base_params aim_move_to_crouch_offset;
+	base_params aim_move_from_crouch_offset;
+	base_params aim_move_to_slow_crouch_offset;
+	base_params aim_move_from_slow_crouch_offset;
+
+	base_params aim_move_to_rlookout_offset;
+	base_params aim_move_from_rlookout_offset;
+	base_params aim_move_to_llookout_offset;
+	base_params aim_move_from_llookout_offset;
+
+	base_params aim_move_jump_offset;
+	base_params aim_move_fall_offset;
+	base_params aim_move_landing_offset;
+	base_params aim_move_landing2_offset;
+
+	base_params move_rlookout_offset;
+	base_params move_llookout_offset;
+
+	base_params aim_move_rlookout_offset;
+	base_params aim_move_llookout_offset;
+
+	base_params move_left_offset;
+	base_params move_right_offset;
+	base_params move_forward_offset;
+	base_params move_back_offset;
+
+	base_params move_crouch_offset;
+	base_params move_slow_crouch_offset;
+
+	base_params move_jump_offset;
+	base_params move_fall_offset;
+	base_params move_landing_offset;
+	base_params move_landing2_offset;
+
+	float move_rlookout_offset_speed_factor = 1.0f;
+	float move_llookout_offset_speed_factor = 1.0f;
+
+	float aim_move_slow_crouch_factor = 1.0f;
+	float aim_move_crouch_factor = 1.0f;
+	float aim_move_slow_factor = 1.0f;
+
+	float move_slow_crouch_factor = 1.0f;
+	float move_crouch_factor = 1.0f;
+	float move_slow_factor = 1.0f;
+
+	bool no_other_hud_moving_while_suicide = false;
+
+	u32 to_crouch_time = 0;
+	u32 from_crouch_time = 0;
+	u32 to_slow_crouch_time = 0;
+	u32 from_slow_crouch_time = 0;
+
+	u32 to_rlookout_time = 0;
+	u32 from_rlookout_time = 0;
+	u32 to_llookout_time = 0;
+	u32 from_llookout_time = 0;
+
+	float move_weaponhide_factor = 1.0f;
+	float move_unzoom_factor = 1.0f;
+
+	float move_speed_pos = 0.1f;
+	float move_speed_rot = 0.4f;
+
+	float move_suicide_speed_pos = 0.2f;
+	float move_suicide_speed_rot = 0.002f;
+
+	float move_stabilize_factor = 2.0f;
+
+	void Load(const shared_str& section, bool is_16x9);
+};
+
+struct hud_item_measures final
+{
+	enum{e_fire_point=(1<<0), e_fire_point2=(1<<1), e_shell_point=(1<<2), e_16x9_mode_now=(1<<3)};
+	Flags8							m_prop_flags;
+
+	Fvector m_item_attach[EHudOffsetAxis::eAxisMax]; // pos,rot
+
+	struct hud_hands_positions
+	{
+		void Load(const shared_str& section, bool is_16x9);
+		void LoadAimParams(const shared_str& section, bool is_16x9, bool default_is_self);
+		Fvector hands_offsets[EHudOffsetAxis::eAxisMax][EHudOffsetType::eHudOffsetsMax]; // pos,rot //normal, aim, gl, alt-aim, safemode
+		Fvector hands_offsets_saved[EHudOffsetAxis::eAxisMax];							 // pos,rot
+		Fvector hands_offsets_tune[EHudOffsetAxis::eAxisMax][EHudOffsetType::eHudOffsetsMax];
+		bool bIs16x9 = false;
+		shared_str sSection;
+	} m_hands_positions;
+
+	struct inertion_params
+	{
+		float m_tendto_speed;
+		float m_tendto_speed_aim;
+		float m_tendto_ret_speed;
+		float m_tendto_ret_speed_aim;
+	};
+
+	struct collision_params
+	{
+		float stifness = 250.0f;
+		float damping = 250.0f;
+		Fvector obb_scale = { 1.0f, 1.0f, 1.0f };
+		Fvector obb_pos = zero_vel;
+		float dist_min = 0.5f;
+		float dist_max = 0.8f;
+	} m_collision_params;
+
+	inertion_params m_inertion_params; //--#SM+#--
+	weapon_inertion m_weapon_inertion;
+
+	u16								m_fire_bone = u16(-1);
+	Fvector							m_fire_point_offset;
+	u16								m_fire_bone2 = u16(-1);
+	Fvector							m_fire_point2_offset;
+	u16								m_shell_bone = u16(-1);
+	Fvector							m_shell_point_offset;
+
+	Fvector							m_hands_attach_real[2];//pos,rot
+
+	void load						(const shared_str& sect_name, IKinematics* K, bool combined_model);
+};
+
+struct attachable_hud_item final
+{
+	Fobb							m_collision_box;
+	Fvector							m_collision_inertia_pos = zero_vel;
+	Fvector							m_collision_inertia_pos_vel = zero_vel;
+	Fvector							m_collision_inertia_rot = zero_vel;
+	Fvector							m_collision_inertia_rot_vel = zero_vel;
+	player_hud*						m_parent;
+	CHudItem*						m_parent_hud_item;
+	shared_str						m_sect_name;
+	IKinematics*					m_model;
+	u16								m_attach_place_idx;
+	int								m_aim_bone_id = BI_NONE;
+	u16								m_left_ik_bone = BI_NONE;
+	Fmatrix							m_left_ik_offset = Fidentity;
+	bool							m_left_ik_fixed = false;
+	float							m_left_grip_blend = 0.f;
+	shared_str						m_left_grip_target;
+	xr_vector<shared_str>			m_left_grip_motions;
+	xr_vector<shared_str>			m_left_grip_hand_motions;
+	Fmatrix							m_left_grip_ref = Fidentity;
+	bool							m_left_grip_ref_valid = false;
+	bool							m_left_grip_ref_tried = false;
+	Fmatrix							m_left_grip_ancor_ref = Fidentity;
+	xr_vector<Fquaternion>			m_left_grip_pose_ref;
+	float							m_aim_reload_motion = 1.f;
+	float							m_hud_mass = 1.f;
+	float							m_shot_variation = 0.f;
+	float							m_shot_twist = 0.f;
+	float							m_aim_shot_motion = 1.f;
+	float							m_idle_fade = 0.f;
+	float							m_inertia_damping = 0.55f;
+	Fvector							m_inertia_vel_pos = zero_vel;
+	Fvector							m_inertia_vel_rot = zero_vel;
+	Fmatrix							m_collision_xform = Fidentity;
+	hud_item_measures				m_measures;
+	shared_str						m_visual_name;
+	bool							m_model_combined = false;
+
+	//runtime positioning
+	Fmatrix							m_attach_offset;
+	Fmatrix							m_item_transform;
+
+	player_hud_motion_container		m_hand_motions;
+			
+	u32 time_accumulator = 0;
+
+	u32 tocrouch_time_remains = 0;
+	u32 fromcrouch_time_remains = 0;
+	u32 toslowcrouch_time_remains = 0;
+	u32 fromslowcrouch_time_remains = 0;
+
+	u32 torlookout_time_remains = 0;
+	u32 fromrlookout_time_remains = 0;
+	u32 tollookout_time_remains = 0;
+	u32 fromllookout_time_remains = 0;
+
+	void GetCurrentTargetOffset_aim(weapon_inertion& inertion_params, Fvector& pos, Fvector& rot, float& factor, u32& real);
+	void GetCurrentTargetOffset(weapon_inertion& inertion_params, Fvector& pos, Fvector& rot, float& factor, u32& real);
+	void AddOffsets(weapon_inertion::base_params& base, Fvector& pos, Fvector& rot, float koef = 1.0f);
+	void AddSuicideOffset(weapon_inertion& inertion_params, const shared_str& section, Fvector& pos, Fvector& rot);
+
+			attachable_hud_item(player_hud* pparent)
+		: m_parent(pparent), m_upd_firedeps_frame(u32(-1)), m_parent_hud_item(NULL) {}
+			~attachable_hud_item	();
+	void load						(const shared_str& sect_name);
+	void update						(bool bForce);
+	void update_hud_additional		(Fmatrix& trans);
+	void setup_firedeps				(firedeps& fd);
+	void render						();	
+	void render_item_ui				();
+	bool render_item_ui_query		();
+	bool need_renderable			();
+	u8 left_grip_motion_mode		(const shared_str& motion) const;
+	void set_bone_visible			(const shared_str& bone_name, bool bVisibility, bool bSilent=false);
+	void debug_draw_firedeps		();
+	void UpdateInertion				(u32 delta, CActor* actor);
+
+	//hands bind position
+	Fvector&						hands_attach_pos();
+	Fvector&						hands_attach_rot();
+
+	//hands runtime offset
+	Fvector&						hands_offset_pos();
+	Fvector&						hands_offset_rot();
+
+//props
+	u32								m_upd_firedeps_frame;
+	void		tune				(Fvector values);
+	void		anim_play			(const shared_str& item_anm_name, EHudMixType bMixIn, float speed, player_hud_motion* anm = nullptr);
+	void		anim_play_bonepart	(const shared_str& anim, bool bMixIn);
+	u32			anim_play			(const shared_str& anim_name, EHudMixType bMixIn, const CMotionDef*& md, u8& rnd, bool disable_random);
+
+};
+
+struct animator_item
+{
+	player_hud* m_parent = nullptr;
+	IKinematics* m_item = nullptr;
+	CHudAnimatorBase* m_animator = nullptr;
+
+	Fmatrix m_attach_offset;
+	Fmatrix m_item_transform;
+	Fvector m_item_attach[2];
+	u32	m_upd_firedeps_frame = u32(-1);
+	bool IsPlaying = false;
+	hud_item_measures::hud_hands_positions m_hands_positions;
+	player_hud_motion_container	m_hand_motions;
+	bool m_has_fire_point = false;
+	u16 m_fire_bone = u16(-1);
+	Fvector m_fire_point_offset;
+
+	shared_str m_section;
+
+	animator_item(CHudAnimatorBase* animator, player_hud* pParent, const shared_str& section);
+	~animator_item();
+	void update(bool bForce);
+	void render();
+
+	Fvector& hands_attach_pos();
+	Fvector& hands_attach_rot();
+	
+	bool NeedMovementBlend();
+
+	void update_hud_additional(Fmatrix& trans);
+
+	void anim_play(const shared_str& item_anm_name, bool bMixIn, float speed, const player_hud_motion* Motion);
+	u32 anim_play(const shared_str& anim_name, bool bMixIn, const CMotionDef*& md, float SpeedFactor = 1.0f, float* EffectiveSpeed = nullptr);
+	void			setup_firedeps		(firedeps& fd);
+};
+
+struct script_layer
+{
+	enum EBlendLayers : u8
+	{
+		eNone = 0,
+		eAimStart,
+		eAimEnd,
+		eSafemodeIn,
+		eSafemodeOut,
+		eWatchesIn,
+		eWatchesOut,
+	};
+
+	shared_str name;
+	CObjectAnimator* anim = nullptr;
+	float blend_scale = 0.0f;
+	float power = 1.0f;
+	float speed = 1.0f;
+	Fvector2 blend_factors = { 0.4f, 0.4f }; //x+, y-
+	bool active = false;
+	bool mix = false;
+	Fmatrix m_XFORM;
+	u8 part = 0;
+	u8 item = 0;
+	u8 state = EBlendLayers::eNone;
+
+	script_layer()
+	{
+		m_XFORM.identity();
+		anim = new CObjectAnimator();
+	}
+
+	script_layer(const shared_str& name, float speed, float power, Fvector2 blend_factors, bool looped, bool mix, u8 part, u8 item, u8 state)
+	{
+		m_XFORM.identity();
+		anim = new CObjectAnimator();
+
+		Play(name, speed, power, blend_factors, looped, mix, part, item, state);
+	}
+
+	void Play(const shared_str& name, float speed, float power, Fvector2 blend_factors, bool looped, bool mix, u8 part, u8 item, u8 state)
+	{
+		m_XFORM.identity();
+
+		this->name = name;
+		this->power = power;
+		this->speed = speed;
+		this->blend_factors = blend_factors;
+
+		anim->Load(*name);
+
+		this->part = part;
+		this->mix = mix;
+		this->state = state;
+		this->item = item;
+
+		blend_scale = 0.0f;
+		active = true;
+
+		if (state != EBlendLayers::eNone)
+		{
+			CallStartCallback();
+		}
+
+		m_XFORM.identity();
+		anim->Play(looped);
+		anim->Speed() = speed;
+	}
+
+	void CallStartCallback();
+	void CallEndCallback();
+
+	~script_layer()
+	{
+		m_XFORM.identity();
+		xr_delete(anim);
+	}
+
+	bool IsPlaying()
+	{
+		return anim->IsPlaying();
+	}
+
+	void Stop(bool bForce)
+	{
+		if (bForce)
+		{
+			anim->Stop();
+			blend_scale = 0.0f;
+			m_XFORM.identity();
+		}
+		else
+		{
+			mix = true;
+		}
+
+		active = false;
+		state = EBlendLayers::eNone;
+	}
+
+	void Loop()
+	{
+		anim->Stop();
+		anim->Play(true);
+	}
+
+	const Fmatrix& XFORM()
+	{
+		m_XFORM.set(anim->XFORM());
+
+		Fvector rotation = zero_vel, position = zero_vel;
+		m_XFORM.getXYZ(rotation);
+		position = m_XFORM.c;
+
+		const float weight = power * blend_scale * blend_scale * (3.0f - 2.0f * blend_scale);
+		position.mul(weight);
+		rotation.mul(weight);
+
+		m_XFORM.setXYZ(rotation);
+		m_XFORM.translate_over(position);
+
+		return m_XFORM;
+	}
+};
+
+struct SBlendParams
+{
+	shared_str camera_name;
+	Fvector2 speed_power = { 1.0f, 1.0f };
+	Fvector2 blend_params = { 0.4f, 0.4f };
+
+	bool has_motion = false;
+
+	void Load(const shared_str& section, const shared_str& anim_name, bool add_folder_name = true)
+	{
+		if (pSettings->line_exist(section, anim_name) && pSettings->r_string(section, *anim_name))
+		{
+			shared_str line = pSettings->r_string(section, *anim_name);
+			string512 tmp = {};
+			u8 params_count = _GetItemCount(*line);
+
+			//name
+			_GetItem(*line, 0, tmp);
+			if (add_folder_name)
+			{
+				camera_name.printf("blend\\%s.anm", tmp);
+			}
+			else
+			{
+				camera_name._set(tmp);
+			}
+
+			//speed
+			if (params_count >= 2)
+			{
+				_GetItem(*line, 1, tmp);
+				speed_power.x = atof(tmp) ? atof(tmp) : 1.0f;
+			}
+
+			//power
+			if (params_count >= 3)
+			{
+				_GetItem(*line, 2, tmp);
+				speed_power.y = atof(tmp) ? atof(tmp) : 1.0f;
+			}
+
+			//blend factor +
+			if (params_count >= 4)
+			{
+				_GetItem(*line, 3, tmp);
+				blend_params.x = atof(tmp) ? atof(tmp) : 0.4f;
+			}
+
+			///blend factor -
+			if (params_count >= 5)
+			{
+				_GetItem(*line, 4, tmp);
+				blend_params.y = atof(tmp) ? atof(tmp) : 0.4f;
+			}
+
+			has_motion = true;
+		}
+	}
+};
+
+struct movement_layer
+{
+	Fmatrix m_XFORM;
+
+	shared_str name;
+
+	float speed = 1.0f;
+	float power = 1.0f;
+	float blend_scale = 0.0f;
+	Fvector2 blend_factors = { 0.4f, 0.4f }; //x+, y-
+
+	bool playing = false;
+
+	CObjectAnimator* anim = nullptr;
+
+	movement_layer()
+	{
+		m_XFORM.identity();
+		anim = new CObjectAnimator();
+	}
+
+	~movement_layer()
+	{
+		m_XFORM.identity();
+		xr_delete(anim);
+	}
+
+	const Fmatrix& XFORM()
+	{
+		m_XFORM.set(anim->XFORM());
+
+		Fvector rotation = zero_vel, position = zero_vel;
+		m_XFORM.getXYZ(rotation);
+		position = m_XFORM.c;
+
+		const float weight = power * blend_scale * blend_scale * (3.0f - 2.0f * blend_scale);
+		position.mul(weight);
+		rotation.mul(weight);
+
+		m_XFORM.setXYZ(rotation);
+		m_XFORM.translate_over(position);
+
+		return m_XFORM;
+	}
+
+	void Load(const shared_str& anim_name)
+	{
+		name = anim_name;
+		anim->Load(anim_name.c_str());
+	}
+
+	float Phase()
+	{
+		const SAnimParams& params = anim->anim_param();
+		return anim->IsPlaying() && params.max_t > params.min_t ? (params.t_current - params.min_t) / (params.max_t - params.min_t) : -1.0f;
+	}
+
+	void Play(bool loop = true, float phase = -1.0f)
+	{
+		if (!anim->Name())
+		{
+			return;
+		}
+
+		if (anim->IsPlaying())
+		{
+			playing = true;
+			return;
+		}
+
+		playing = true;
+		anim->Speed() = speed;
+		anim->Play(loop);
+
+		const SAnimParams& params = anim->anim_param();
+		if (phase > 0.0f && speed > 0.0f)
+		{
+			anim->Update(phase * (params.max_t - params.min_t) / speed);
+		}
+	}
+
+	void Stop(bool bForce = false)
+	{
+		if (bForce)
+		{
+			anim->Stop();
+			blend_scale = 0.0f;
+			m_XFORM.identity();
+		}
+
+		playing = false;
+	}
+
+	void Reload(const shared_str& anim_name, Fvector2 speed_power, Fvector2 blend_factors)
+	{
+		if (anim_name.size() == 0)
+		{
+			return;
+		}
+
+		if (name != anim_name)
+		{
+			Stop(true);
+			name = anim_name;
+			anim->Clear();
+			anim->Load(anim_name.c_str());
+		}
+
+		power = speed_power.y;
+		speed = speed_power.x;
+		this->blend_factors = blend_factors;
+	}
+};
+
+struct BoneCallbackParams
+{
+	Fvector m_current = zero_vel;
+	Fvector m_target = zero_vel;
+};
+
+enum EBoneCallbackParam
+{
+	r_finger0 = 0,
+	r_finger01,
+	r_finger02,
+};
+
+class player_hud
+{
+public: 
+					player_hud			(bool invert = false);
+					~player_hud			();
+	void			load				(const shared_str& model_name);
+	void			load_default		();
+	void			update				(const Fmatrix& trans);
+	void			render_hud			();
+	bool HasHumanoidPose() const;
+	const char* HumanoidDebugState() const;
+	bool EnsureHumanoidTarget(xr_string& Error);
+	void PrepareHumanoidBody();
+	void UpdateHumanoidPose();
+	void ResetHumanoidPose();
+	void RenderHumanoidBody();
+	bool HumanoidItemPose(const CHudItem* Item, Fmatrix& Pose) const;
+	bool HumanoidEyes(Fmatrix& Pose) const;
+	void RecordHumanoidMotion(const shared_str& Source, const shared_str& Clip, const MotionID& Motion, float Speed);
+	bool BeginSettingsPose();
+	bool RefreshSettingsPose(const Fvector& Position, const Fvector& Rotation);
+	void EndSettingsPose();
+	bool SettingsPoseValid() const;
+	void			render_item_ui		();
+	bool			render_item_ui_query();
+
+	u32				anim_play			(u16 part, const MotionID& M, bool bMixIn, const CMotionDef*& md, float speed, IKinematicsAnimated* model);
+	bool			check_anim			(const shared_str& anim_name, u16 place_idx);
+
+	bool			animator_play			(const shared_str& anim_name, u16 place_idx = u16(-1), u16 part_id = u16(-1), bool bMixIn = false, float speed = 1.0f, u8 anm_idx = u8(0), bool impact_on_item = false, bool similar_check = false, PlayCallback Callback = PlayCallback(0), LPVOID CallbackParam = nullptr, bool UpdateCallbackType = 0);
+
+	// анимация-эффект которая не будет отключать обычные анимации но позволит создать подрагивания уклонения и прочие анимационные эффекты
+	void			animator_fx_play		(const shared_str& anim_name, u16 place_idx = u16(-1), u16 part_id = u16(-1), u8 anm_idx = u8(0), float blendAccrue = 1.f, float blendFalloff = 1.f, float Speed = 1.f, float Power = 1.f);
+
+	const shared_str& section_name		() const {return m_sect_name;}
+
+	attachable_hud_item* create_hud_item(const shared_str& sect);
+	void			RemoveHudItem		(const shared_str& sect);
+	void			attach_item			(CHudItem* item);
+	bool			allow_activation	(CHudItem* item);
+	attachable_hud_item* attached_item	(u16 item_idx)	{return m_attached_items[item_idx];};
+	void			detach_item_idx		(u16 idx);
+	void			detach_item			(CHudItem* item);
+	void			detach_all_items	(){m_attached_items[0]=NULL; m_attached_items[1]=NULL;};
+
+	void			calc_transform		(u16 attach_slot_idx, const Fmatrix& offset, Fmatrix& result, bool forceLegacyTransform = false);
+	void			tune				(Fvector values);
+	u32				motion_length		(const MotionID& M, const CMotionDef*& md, float speed, IKinematicsAnimated* model);
+	u32				motion_length		(const shared_str& anim_name, const shared_str& hud_name, const CMotionDef*& md);
+	void			OnMovementChanged	(ACTOR_DEFS::EMoveCommand cmd)	;
+	void			RestoreHandBlends(const char* ignored_part);
+
+	void			ResetBlockedPartID(){m_blocked_part_idx=u16(-1); };
+	void			SetBlockedPartID(u16 val){m_blocked_part_idx = val; }
+	void			SetHandsVisible(bool val){m_bhands_visible=val;};
+	bool			GetHandsVisible(){return m_bhands_visible;};
+
+	Fmatrix&		GetTransform(){return m_transform;};
+	// Authored PMA movement curves sampled by the existing HUD animator, then
+	// passed to the ONE visible actor skeleton (never a second rendered pair of hands).
+	const Fvector& LiminalPmaRotation() const { return m_liminal_pma_rotation; }
+	const Fvector& LiminalPmaTranslation() const { return m_liminal_pma_translation; }
+
+	void			UpdateWeaponOffset(u32 delta);
+	void			OnShotAnimation		(const attachable_hud_item* item);
+	void			OnHudMotionMark		(const attachable_hud_item* item, const shared_str& mark);
+	void			OnHudMotionStarted	(const shared_str& motion);
+
+	IKinematics*	m_legs_model;
+	IKinematics*	m_first_person_body_model = nullptr;
+	shared_str	m_first_person_body_visual;
+	HumanoidPresentation* m_humanoid = nullptr;
+	s32				m_show_legs = 1;
+	bool			m_need_reload = true;
+	float			m_cycle_fade = 0.f;
+	shared_str		NextHUDSect;
+	Fvector m_liminal_pma_rotation = zero_vel;
+	Fvector m_liminal_pma_translation = zero_vel;
+	bool m_liminal_pma_reload_mark = false;
+	bool m_liminal_pma_last_reloading = false;
+	SBlendParams m_default_movement_layers_params[EMovementLayers::eLayersCount] = {};
+	movement_layer* m_movement_layers[EMovementLayers::eLayersCount] = {};
+	xr_vector<script_layer*> m_script_layers = {};
+
+	IKinematicsAnimated* GetModel() { return m_model; }
+	animator_item* create_animator_item(CHudAnimatorBase* animator, const shared_str& section);
+	void			delete_animator_item();
+	animator_item* GetAnimator() { return m_animator_item; }
+	void UpdateMovementLayers(bool reload_anims = false);
+
+	script_layer* PlayBlendAnm(const shared_str& name, float speed, float power, Fvector2 blend_factors, bool looped, bool mix, bool restart, u8 part, u8 item, u8 state);
+	void StopBlendAnm(const shared_str& name, bool bForce = false);
+	void StopAllBlendAnms(bool bForce);
+	bool IsBlendAnmActive(const shared_str& name);
+
+private:
+	bool			need_render_hands	();
+	void			update_inertion		(Fmatrix& trans);
+	void			update_hands_ik		(const Fmatrix& cam_trans, CActor* actor);
+	bool			left_grip_reference	(attachable_hud_item* item);
+	xr_vector<u16>	left_arm_blend_bones() const;
+	float								m_left_grip_weight = 0.f;
+	bool								m_left_grip_reaching = false;
+	u32									m_left_grip_snap_frame = u32(-1);
+	float								m_left_grip_hold = 0.f;
+	float								m_left_grip_arm_weight = 1.f;
+	bool								m_left_grip_hand_only = false;
+	bool								m_left_grip_release_by_mark = false;
+	xr_vector<u16>	left_arm_subtree	() const;
+	const Fvector&	attach_rot			() const;
+	const Fvector&	attach_pos			() const;
+
+	shared_str							m_sect_name;
+
+	Fmatrix								m_attach_offsetr, m_attach_offsetl;
+
+    // Presentation snapshots reference the existing HUD objects, never clones.
+    bool SettingsPoseReady = false;
+    bool SettingsPoseActive = false;
+    attachable_hud_item* SettingsPoseSource = nullptr;
+    Fmatrix SettingsPoseParent, SettingsPoseAttach;
+    Fmatrix SettingsPoseRight, SettingsPoseLeft, SettingsPoseItem, SettingsPoseWatch;
+    Fmatrix SettingsPoseBaseRight, SettingsPoseBaseLeft, SettingsPoseBaseItem, SettingsPoseWatchLocal;
+	Fmatrix								m_transform;
+	Fmatrix								m_transformL;
+	// Freeze only HUD orientation during native head-look; preserve camera position.
+	bool m_LiminalHeadHudHeld = false;
+	Fmatrix m_LiminalHeadHudTransform = Fidentity;
+
+	IKinematicsAnimated*				m_model = nullptr;
+	xr_vector<u16>						m_ancors;
+	u16									m_left_ik_chain[3] = { BI_NONE, BI_NONE, BI_NONE };
+	u16									m_right_ik_chain[3] = { BI_NONE, BI_NONE, BI_NONE };
+	float								m_left_ik_weight = 0.f;
+	Fmatrix								m_layers_ik_offset = Fidentity;
+	Fvector								m_turn_offset = zero_vel;
+	Fmatrix								m_aim_reload_ref = Fidentity;
+	float								m_aim_reload_weight = 0.f;
+	float								m_aim_reload_release = 1.f;
+	Fmatrix								m_shot_ref = Fidentity;
+	float								m_shot_weight = 0.f;
+	float								m_shot_release = 1.f;
+	Fvector								m_shot_rot_scale = { 1.f, 1.f, 1.f };
+	Fvector								m_shot_pos_scale = { 1.f, 1.f, 1.f };
+	Fvector2							m_shot_twist = { 0.f, 0.f };
+	bool								m_layers_ik = false;
+	u32									m_movement_key = 0;
+	attachable_hud_item*				m_attached_items[2];
+	animator_item*						m_animator_item = nullptr;
+	xr_vector<attachable_hud_item*>		m_pool;
+
+	u16									m_blocked_part_idx;
+	bool								m_bhands_visible;
+	bool								m_binverted;
+	int									item_idx_priority;
+	void  LeftArmCallback(CBoneInstance* B);
+	static void FingerCallback(CBoneInstance* B);
+public:
+	xr_map<EBoneCallbackParam, BoneCallbackParams*> m_bone_callback_params; // bonename,params
+
+	IKinematics* m_watches_model = nullptr;
+	Fmatrix m_watches_transform = Fidentity;
+	Fmatrix m_watches_attach_offset = Fidentity;
+	Fvector m_watches_pos = zero_vel;
+	Fvector m_watches_rot = zero_vel;
+	float m_watches_scale = 1.0f;
+	u16 m_watches_bone = BI_NONE;
+	CWatchDevice* m_watch_device = nullptr;
+
+	CWatchDevice& WatchDevice() { return *m_watch_device; }
+	void destroy_watches();
+
+	void reset_thumb(bool bForce)
+	{
+		if (bForce)
+		{
+			m_bone_callback_params[r_finger0]->m_current.set(0.f, 0.f, 0.f);
+			m_bone_callback_params[r_finger01]->m_current.set(0.f, 0.f, 0.f);
+			m_bone_callback_params[r_finger02]->m_current.set(0.f, 0.f, 0.f);
+		}
+
+		m_bone_callback_params[r_finger0]->m_target.set(0.f, 0.f, 0.f);
+		m_bone_callback_params[r_finger01]->m_target.set(0.f, 0.f, 0.f);
+		m_bone_callback_params[r_finger02]->m_target.set(0.f, 0.f, 0.f);
+	}
+};
+
+extern player_hud* g_player_hud;
