@@ -1,0 +1,8 @@
+newton-usd-schemas==0.6.0
+numpy==2.5.4
+ovphysx==0.7.0.74035321
+ovstage==0.3.0.1791986420
+packaging==23.2
+physx-usd-schemas==25.11.2.72696984
+pillow==13.0.0
+warp-lang==1.18.0
