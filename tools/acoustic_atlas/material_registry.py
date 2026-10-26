@@ -34,11 +34,16 @@ def compile_registry(rows: list[dict], source_sha: str) -> dict:
                 isinstance(x, (float, int)) and math.isfinite(x) and 0 <= x <= 1
                 for x in v) for v in spectra
         )
+        violations = []
         if known:
             a, t, loss = spectra
-            if any(abs(x + y - z) > 1e-4 for x, y, z in zip(a, t, loss)):
-                raise ValueError(f"inconsistent energy balance for {name}")
-            reflection9 = [max(0.0, 1.0 - z) for z in loss]
+            for band, (absorption, transmission, recorded_loss) in enumerate(zip(a, t, loss)):
+                if absorption + transmission > 1.0 + 1e-5:
+                    violations.append({"band": band, "kind": "ENERGY_OVER_UNITY",
+                                       "excess": absorption + transmission - 1.0})
+                if abs(min(1.0, absorption + transmission) - recorded_loss) > 1e-4:
+                    violations.append({"band": band, "kind": "BOUNDARY_LOSS_MISMATCH"})
+            reflection9 = [max(0.0, 1.0 - z) for z in loss] if not violations else None
         else:
             reflection9 = None
         items.append({
@@ -50,6 +55,8 @@ def compile_registry(rows: list[dict], source_sha: str) -> dict:
             "dry_absorption_energy9": spectra[0] if known else None,
             "dry_transmission_energy9": spectra[1] if known else None,
             "dry_reflection_energy9": reflection9,
+            "physics_review_required": bool(violations),
+            "physics_review_reasons": violations,
             "wet_absorption_energy9": None, "wet_transmission_energy9": None,
             "wet_profile_status": "NOT_RECORDED",
             "wet_coverage_status": "UNDETERMINED_BY_ATLAS",
@@ -82,6 +89,8 @@ def compile_registry(rows: list[dict], source_sha: str) -> dict:
             sum(x["dry_absorption_energy9"] is None for x in items),
         "shared_dry_spectral_profiles": [ids for ids in shared.values() if len(ids) > 1],
         "fully_evidenced_wet_profiles": 0,
+        "materials_needing_physics_review": [
+            r["native_id"] for r in items if r["physics_review_required"]],
         "note": "Unique native identities do not imply unique measured coefficients.",
         "materials": items,
     }
