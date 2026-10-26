@@ -88,7 +88,10 @@ class PathsTests(unittest.TestCase):
 
 def make_fixture(path: Path, wet_reference: float) -> None:
     room_floats = [0.] * 23
-    room_floats[8] = wet_reference
+    room_floats[3:6] = [4.0, 4.0, 3.0]  # validated physical bounding box
+    room_floats[6:12] = [48.0, 80.0, wet_reference, 0.95, 2.0, 0.0]
+    room_floats[12:21] = [.2] * 9
+    room_floats[21:23] = [78.0, 1.0]  # fully sampled closed area
     logical = (
         struct.pack("<I", 1)
         + ROOM.pack(1, 1, *room_floats)
@@ -116,7 +119,8 @@ class BinaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "rooms"
             make_fixture(p, 1.25)
-            self.assertTrue(inspect(p)["physical_installable"])
+            self.assertTrue(inspect(p)["physical_record_candidate"])
+            self.assertFalse(inspect(p)["physical_installable"])  # missing env/CFORM pair
 
     def test_rejects_corrupt_block(self):
         with tempfile.TemporaryDirectory() as d:
