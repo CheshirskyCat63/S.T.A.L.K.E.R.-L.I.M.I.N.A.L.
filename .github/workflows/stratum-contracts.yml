@@ -1,0 +1,30 @@
+name: STRATUM contract checks
+
+on:
+  push:
+    branches: [ixray.stratum]
+    paths:
+      - "src/stratum/core/**"
+      - "tests/stratum/**"
+      - ".github/workflows/stratum-contracts.yml"
+  pull_request:
+    paths:
+      - "src/stratum/core/**"
+      - "tests/stratum/**"
+      - ".github/workflows/stratum-contracts.yml"
+
+jobs:
+  contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure independent C++17 contract test
+        run: cmake -S tests/stratum -B build/stratum-contract
+      - name: Build independent contract test
+        run: cmake --build build/stratum-contract --config Release
+      - name: Run independent contract test
+        run: ctest --test-dir build/stratum-contract -C Release --output-on-failure
