@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.17)
+project(StratumContracts LANGUAGES CXX)
+
+enable_testing()
+add_executable(stratum_authority_test authority_test.cpp)
+target_compile_features(stratum_authority_test PRIVATE cxx_std_17)
+target_include_directories(stratum_authority_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/stratum/core)
+if(MSVC)
+    target_compile_options(stratum_authority_test PRIVATE /W4)
+else()
+    target_compile_options(stratum_authority_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME stratum_authority_contract COMMAND stratum_authority_test)
