@@ -4,13 +4,14 @@
 
 ## Что здесь установлено
 
-- `vendor/PhysX/physx/` — исходники NVIDIA PhysX 5.12.0, git `b97365c`, sparse checkout официального репозитория.
+- `vendor/PhysX/physx/`, `vendor/PhysX/blast/`, `vendor/PhysX/flow/` — официальные исходники NVIDIA PhysX 5.12.0, Blast и Flow, git `b97365c`; Blast/Flow пока только подготовлены, не скомпилированы и не внедрены.
 - `vendor/ovphysx-sdk/ovphysx/` — официальный нативный C/C++ SDK `ovphysx 0.7.0`, GPU PhysX runtime и примеры.
 - `.venv/` — изолированная Python 3.12-среда: `ovphysx==0.7.0.74035321`, `ovstage`, `warp-lang`, USD-схемы и Pillow. Не глобальная установка.
 - `build/` — Visual Studio 2022 Release-сборки отдельных SDK-примеров и нашего native PBD-прототипа.
 - `experiments/pbd_shot.py` — **реальное** взаимодействие физического снаряда с GPU-PBD; сравнение с контрольным запуском.
 - `integration/native_pbd/` — оригинальная C-программа, работающая непосредственно через официальный C API NVIDIA.
 - `reports/pbd_shot_real_gpu.gif` — анимация **из фактически рассчитанных координат**, не подставные FX.
+- [`reports/pbd_shot_live.webp`](reports/pbd_shot_live.webp) — та же реальная симуляция в компактном анимированном WebP, опубликована в GitHub; снимки [`impact`](reports/pbd_shot_impact_preview.png) и [`final`](reports/pbd_shot_final_preview.png).
 
 ## Первый опыт
 
