@@ -41,3 +41,8 @@ ctest --test-dir build/stratum-contract --output-on-failure
 ```
 
 This tests *contracts only*. It does not demonstrate a running STRATUM game, as no native game build is included in this change.
+
+## Windows CI checkout limitation (verified 2026-10-27)
+
+The repository's name ends in a literal dot (`S.T.A.L.K.E.R.-L.I.M.I.N.A.L.`). On a GitHub-hosted Windows runner the default `GITHUB_WORKSPACE` path also ends in a dot and `actions/checkout@v4` errors before it can read source (`Directory ... does not exist`). This is a Windows path normalization issue, not a C++ failure. The test workflow checks out the **exact commit** in `RUNNER_TEMP/stratum-source` for Windows, and uses ordinary checkout on Linux. No repository or branch rename is needed.
+

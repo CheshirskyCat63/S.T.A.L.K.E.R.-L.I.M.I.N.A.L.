@@ -13,6 +13,9 @@ on:
       - "tests/stratum/**"
       - ".github/workflows/stratum-contracts.yml"
 
+permissions:
+  contents: read
+
 jobs:
   contracts:
     strategy:
@@ -21,10 +24,51 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Configure independent C++17 contract test
-        run: cmake -S tests/stratum -B build/stratum-contract
-      - name: Build independent contract test
-        run: cmake --build build/stratum-contract --config Release
-      - name: Run independent contract test
-        run: ctest --test-dir build/stratum-contract -C Release --output-on-failure
+      - name: Checkout on Linux
+        if: runner.os != 'Windows'
+        uses: actions/checkout@v4
+
+      # Repository name ends with '.', which is normalized/trimmed in native
+      # Win32 paths. The default GITHUB_WORKSPACE is therefore not addressable
+      # by actions/checkout on Windows. Clone the exact commit under RUNNER_TEMP.
+      - name: Checkout exact commit in safe Windows path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        env:
+          STRATUM_REPO: https://github.com/${{ github.repository }}.git
+          STRATUM_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:RUNNER_TEMP 'stratum-source'
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          git -C "$src" init
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C "$src" remote add origin "$env:STRATUM_REPO"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C "$src" fetch --no-tags --depth 1 origin "$env:STRATUM_SHA"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C "$src" -c core.longpaths=true checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure and test on Linux
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S tests/stratum -B build/stratum-contract -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/stratum-contract --config Release
+          ctest --test-dir build/stratum-contract -C Release --output-on-failure
+
+      - name: Configure and test on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:RUNNER_TEMP 'stratum-source'
+          $build = Join-Path $env:RUNNER_TEMP 'stratum-build'
+          cmake -S "$src/tests/stratum" -B "$build"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$build" --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir "$build" -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
